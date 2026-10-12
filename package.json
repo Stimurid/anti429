@@ -1,0 +1,12 @@
+{
+  "name": "anti429",
+  "version": "0.1.0",
+  "private": true,
+  "description": "4̅2̅9̅ — Chrome extension: ChatGPT rate-limit traffic light, account-wide pacing, tab doctor",
+  "scripts": {
+    "test": "node --test tests/shared.test.js tests/guard.test.js tests/recovery.test.js",
+    "test:browser": "node tests/browser-test.mjs",
+    "test:e2e": "node tests/e2e-test.mjs",
+    "icons": "pwsh -File tools/make-icons.ps1"
+  }
+}

@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>4̅2̅9̅</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="logo"><span class="ol">429</span></div>
+    <div id="light" class="light idle" title="общий уровень"></div>
+    <div id="summary" class="summary">…</div>
+  </header>
+
+  <section>
+    <h2>Лимиты <small>запросов за 10 с к порогу</small></h2>
+    <div id="meters"></div>
+    <p class="note" id="meterNote"></p>
+  </section>
+
+  <section>
+    <div class="row between">
+      <h2>Вкладки ChatGPT</h2>
+      <span class="note" id="tabCount"></span>
+    </div>
+    <div class="actions">
+      <button id="btnLoops" title="Выгрузить контент вкладок, которые крутят цикл опроса">Сбросить «дёргающие»</button>
+      <button id="btnBg" title="Выгрузить все фоновые вкладки ChatGPT (не активные и без звука)">Сбросить фоновые</button>
+      <button id="btnProtect" class="warn" hidden title="Подключить защиту к вкладкам, открытым до установки, без перезагрузки (F5 на всех сразу — это штурм)">Защитить открытые вкладки</button>
+    </div>
+    <p class="note" id="skipNote" hidden></p>
+    <div id="tabs" class="tabs"></div>
+    <p class="note">«Сбросить» = Chrome выгружает содержимое вкладки, сама вкладка остаётся и перезагрузится по клику. Неотправленный черновик может пропасть.</p>
+  </section>
+
+  <section>
+    <h2>Сессия</h2>
+    <div class="actions">
+      <button id="btnSave">Сохранить открытые чаты</button>
+      <button id="btnCancel" class="ghost">Остановить восстановление</button>
+    </div>
+    <div id="sessions"></div>
+    <div class="row">
+      <label>пауза между вкладками, с <input id="gap" type="number" min="3" max="120" step="1"></label>
+    </div>
+  </section>
+
+  <section>
+    <h2>Настройки</h2>
+    <label class="chk"><input type="checkbox" id="chkEnabled"> Защита страниц включена (pacing + удержание при 429)</label>
+    <div class="actions"><button id="btnReset" class="ghost">Забыть выученные пороги</button></div>
+    <p class="note">Пороги со знаком «~» — предположение, пока не пойман реальный 429. После 429 расширение запоминает, сколько запросов за 10 с было допустимо, и ужимает pacing.</p>
+  </section>
+
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
