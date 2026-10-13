@@ -241,6 +241,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
+    GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,
     versionGreater, isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,

@@ -4,17 +4,18 @@
 // 2) relays guard events (hold/429/recovered) to the service worker for the popup and badge.
 (() => {
   "use strict";
-  if (window.__A429_BRIDGE2__) return;
-  window.__A429_BRIDGE2__ = true;
+  if ((window.__A429_BRIDGE_GEN__ || 0) >= 3) return; // this world is fresh after every extension reload
+  window.__A429_BRIDGE_GEN__ = 3;
 
   const NS = "a429:";
   const mirror = items => {
     try {
       if (items.ceilings) localStorage.setItem(NS + "ceil", JSON.stringify(items.ceilings));
-      if (items.cfg) localStorage.setItem(NS + "cfg2", JSON.stringify(items.cfg));
-      // Previous generations of guard.js/recovery.js (already running in this page, impossible to unwrap) read "cfg":
-      // tell them to pass everything straight through; the new guard takes over via "cfg2".
-      localStorage.setItem(NS + "cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg2" }));
+      if (items.cfg) localStorage.setItem(NS + "cfg3", JSON.stringify(items.cfg));
+      // Previous generations of guard.js/recovery.js (already running in this page, impossible to unwrap) read "cfg"
+      // (generation 1) and "cfg2" (generation 2): tell them to pass everything straight through. Generation 3+ reads "cfg3".
+      localStorage.setItem(NS + "cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg3" }));
+      localStorage.setItem(NS + "cfg2", JSON.stringify({ enabled: false, recovery: false, deadStream: false, handedOffTo: "cfg3" }));
     } catch {}
   };
   const pull = () => {
@@ -165,6 +166,7 @@
 
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.type === "a429_ping") { sendResponse({ ok: true, gen: 3 }); return; }
       if (msg && msg.type === "a429_scan" && sender.id === chrome.runtime.id) {
         scanAccount(msg.params || {}).then(sendResponse, () => sendResponse({ ok: false, reason: "scan-error" }));
         return true; // async response

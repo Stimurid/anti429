@@ -334,6 +334,7 @@ async function reaperTick(force) {
   try {
     const now = Date.now();
     const R = await reaperState();
+    if (R.lastError === "no-bridge") await ensureBridges();
     const suspects = Object.keys(R.obs).filter(id => R.obs[id].status === "IS_STREAMING");
     const every = suspects.length ? cfg.reaperFastMs : cfg.reaperEveryMs;
     if (!force && now - R.lastAudit < every) return { skipped: true };
@@ -483,11 +484,35 @@ async function probeGuards(force) {
   for (const t of await chatTabs()) {
     if (t.discarded) { delete G[t.id]; continue; }
     try {
-      const [r] = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: "MAIN", func: () => !!window.__A429_GUARD2__ });
-      if (r && r.result) G[t.id] = true; else delete G[t.id];
+      const [r] = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: "MAIN", func: () => window.__A429_GEN__ || 0 });
+      if (r && r.result >= A.GEN) G[t.id] = true; else delete G[t.id]; // an OLDER generation counts as unprotected: it gets replaced
     } catch {}
   }
   persistSoon();
+}
+
+// After every extension (re)load the bridge (isolated world) that was running in an open tab is orphaned: it can no longer
+// talk to the service worker, so tab state, heal, stop, scan and the event relay all go silent. Ping each tab and
+// re-inject the bridge wherever nobody answers.
+let lastEnsure = 0;
+async function ensureBridges() {
+  lastEnsure = Date.now();
+  const tabs = (await chatTabs()).filter(t => !t.discarded);
+  let pinged = 0, injected = 0;
+  for (const t of tabs) {
+    let alive = false;
+    try { const r = await chrome.tabs.sendMessage(t.id, { type: "a429_ping" }); alive = !!(r && r.ok); } catch {}
+    if (alive) { pinged++; continue; }
+    try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ["bridge.js"], world: "ISOLATED" }); injected++; } catch {}
+    await sleep(100);
+  }
+  return { tabs: tabs.length, pinged, injected };
+}
+
+async function startupRepair() {
+  await ready;
+  await protectOpenTabs();   // replaces older page-side generations
+  await ensureBridges();     // revives bridges orphaned by the reload
 }
 
 async function protectOpenTabs() {
@@ -579,6 +604,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse({ ok: true });
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
+      case "ensureBridges": return sendResponse(await ensureBridges());
       case "healNow": return sendResponse(await healTab(msg.id, true));
       case "stopStream": return sendResponse(await stopStream(msg.id));
       case "reaperRun": return sendResponse(await reaperTick(true));
@@ -694,17 +720,17 @@ chrome.alarms.onAlarm.addListener(async alarm => {
     }
     if (changed) chrome.storage.local.set({ ceilings });
     render().catch(() => {});
-setTimeout(() => probeGuards(true).catch(() => {}), 2000);
     probeGuards(false).catch(() => {});
+    if (Date.now() - lastEnsure > 120000) ensureBridges().catch(() => {});
     healTick().catch(() => {});
     pump();
   }
 });
-chrome.runtime.onInstalled.addListener(async () => { await ready; render().catch(() => {}); setTimeout(() => protectOpenTabs().catch(() => {}), 1500); });
-chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); setTimeout(() => probeGuards(true).catch(() => {}), 3000); });
+chrome.runtime.onInstalled.addListener(() => { render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 1500); });
+chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 3000); });
 render().catch(() => {});
 
-setTimeout(() => probeGuards(true).catch(() => {}), 2000); // service worker (re)start: re-learn which tabs already run the guard
+setTimeout(() => startupRepair().catch(() => {}), 2500); // ANY service-worker start (incl. runtime.reload(), which may not fire onInstalled): upgrade page-side code and revive bridges
 
 // Remember the dashboard window's size/position so the next one opens exactly where the user left it.
 let boundsTimer = null;

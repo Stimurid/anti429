@@ -10,14 +10,23 @@
 // It never touches POST/stream bodies and never bypasses the limiter — it only spaces requests out.
 (() => {
   "use strict";
-  if (window.__A429_GUARD2__) return; // v0.4+ flag; older generations used __A429_GUARD__
   const A = window.A429;
   if (!A) return; // shared.js did not load
+  // Generation protocol: a newer generation REPLACES an older one in place. An older one that offers a dispose hook is
+  // removed cleanly; generations <= 2 have none and are switched to pass-through by the bridge (legacy config keys).
+  if ((window.__A429_GEN__ || 0) >= A.GEN) return;
+  if (typeof window.__A429_DISPOSE__ === "function") { try { window.__A429_DISPOSE__(); } catch {} }
+  window.__A429_GEN__ = A.GEN;
   window.__A429_GUARD2__ = true;
   window.__A429_GUARD__ = true; // keeps old probes truthful
 
   const NS = "a429:";
-  const nativeFetch = window.fetch.bind(window);
+  const nativeFetch = window.__A429_NATIVE_FETCH__ || (window.__A429_NATIVE_FETCH__ = window.fetch.bind(window));
+  window.__A429_DISPOSE__ = () => {
+    window.fetch = nativeFetch;
+    try { if (typeof window.__A429_RECOVERY_DISPOSE__ === "function") window.__A429_RECOVERY_DISPOSE__(); } catch {}
+    window.__A429_GEN__ = 0;
+  };
 
   const ls = {
     get(k) { try { return localStorage.getItem(NS + k); } catch { return null; } },
@@ -28,7 +37,7 @@
 
   // cfg is mirrored from chrome.storage by bridge.js; tests set it directly.
   const cfg = () => Object.assign(
-    { enabled: true, timeScale: 1, windowMs: A.WINDOW_MS, holdMaxMs: A.HOLD_MAX_MS }, readJSON("cfg2", {}));
+    { enabled: true, timeScale: 1, windowMs: A.WINDOW_MS, holdMaxMs: A.HOLD_MAX_MS }, readJSON("cfg3", {}));
   const off = () => cfg().enabled === false;
   const ceilOf = fam => {
     const c = readJSON("ceil", {});

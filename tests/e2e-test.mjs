@@ -191,6 +191,8 @@ try {
   const tl0 = await tabsList();
   const preId = tl0.find(t => t.url.includes("pre1"));
   check("tab opened BEFORE install was protected by injection (no reload)", preId && s0.tabs[preId.id] && s0.tabs[preId.id].guard === true, preId && s0.tabs[preId.id]);
+  const ebr = await call({ type: "ensureBridges" });
+  check("every open chat tab has a LIVE bridge (ping answered; nothing needed re-injecting)", ebr && ebr.tabs >= 1 && ebr.pinged === ebr.tabs && ebr.injected === 0, ebr);
   await dbg(`/json/close/${preTab.id}`);
 
   // 1) learning: guard OFF, burst of 10 against a limiter that allows only 3 per 3 s (assumed ceiling is 4)

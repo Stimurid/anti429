@@ -14,15 +14,17 @@
 // (stream-observer.js); independent implementation — see THIRD_PARTY_NOTICES.md.
 (() => {
   "use strict";
-  if (window.__A429_RECOVERY2__) return;
   const A = window.A429;
   if (!A) return;
+  if ((window.__A429_RECOVERY_GEN__ || 0) >= A.GEN) return;
+  window.__A429_RECOVERY_GEN__ = A.GEN;
   window.__A429_RECOVERY2__ = true;
   window.__A429_RECOVERY__ = true;
 
   const NS = "a429:";
   const nativeFetch = window.fetch.bind(window);
-  const NativeWebSocket = window.WebSocket;
+  const NativeWebSocket = window.__A429_NATIVE_WS__ || (window.__A429_NATIVE_WS__ = window.WebSocket);
+  window.__A429_RECOVERY_DISPOSE__ = () => { try { window.WebSocket = NativeWebSocket; } catch {} window.__A429_RECOVERY_GEN__ = 0; };
 
   const TTL_MS = 2 * 60 * 1000;
   const STREAMING_MAX_AGE_MS = 30 * 1000;
@@ -35,7 +37,7 @@
   const VALIDATE_MAX_MS = 1500;
 
   const readJSON = (k, d) => { try { const v = localStorage.getItem(NS + k); return v ? JSON.parse(v) : d; } catch { return d; } };
-  const cfg = () => Object.assign({ enabled: true, recovery: true, timeScale: 1 }, readJSON("cfg2", {}));
+  const cfg = () => Object.assign({ enabled: true, recovery: true, timeScale: 1 }, readJSON("cfg3", {}));
   const T = ms => Math.max(1, Math.round(ms * (Number(cfg().timeScale) || 1))); // timeScale is a test hook
   const active = () => { const c = cfg(); return c.enabled !== false && c.recovery !== false; };
 

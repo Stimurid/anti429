@@ -13,7 +13,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // One shared "browser profile": localStorage + Web Locks are shared by all tabs of the origin.
 function makeProfile(cfg) {
   const store = new Map();
-  store.set("a429:cfg2", JSON.stringify(Object.assign({ enabled: true, timeScale: 0.001, windowMs: 200, holdMaxMs: 5000 }, cfg || {})));
+  store.set("a429:cfg3", JSON.stringify(Object.assign({ enabled: true, timeScale: 0.001, windowMs: 200, holdMaxMs: 5000 }, cfg || {})));
   const chains = new Map();
   const locks = {
     request(name, opts, fn) {
@@ -26,7 +26,7 @@ function makeProfile(cfg) {
   return { store, locks };
 }
 
-function makeTab(profile, fetchImpl) {
+function makeTab(profile, fetchImpl, preload) {
   const events = [];
   const win = {
     A429: A, fetch: fetchImpl, location: { href: "https://chatgpt.com/", origin: "https://chatgpt.com" },
@@ -47,6 +47,7 @@ function makeTab(profile, fetchImpl) {
   };
   win.window = win;
   vm.createContext(win);
+  for (const src of preload || []) vm.runInContext(src, win); // an OLDER generation that is already running in the page
   vm.runInContext(code, win);
   const setVisible = v => { win.document.visibilityState = v ? "visible" : "hidden"; win.document._l.slice().forEach(f => f()); };
   return { win, events, setVisible, fetch: (u, i) => win.window.fetch(u, i) };
@@ -261,4 +262,45 @@ test("upgrade hand-off: an older guard already wrapping fetch is switched to pas
   assert.equal(oldIntercepts, 0, "the old generation must not act any more");
   assert.ok(profile.store.get("a429:led:detail"), "the new guard reserved a slot in the shared ledger");
   assert.equal(tab.win.window.__A429_GUARD2__, true);
+});
+
+test("generation hand-off: the REAL gen-2 guard (0.4.2 file) already in the page is switched to pass-through; gen 3 takes over", async () => {
+  const old = fs.readFileSync(path.join(__dirname, "fixtures/guard-gen2-0.4.2.js"), "utf8");
+  const profile = makeProfile();
+  // exactly what the new bridge writes for previous generations
+  profile.store.set("a429:cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg3" }));
+  profile.store.set("a429:cfg2", JSON.stringify({ enabled: false, recovery: false, deadStream: false, handedOffTo: "cfg3" }));
+  let native = 0;
+  const tab = makeTab(profile, async () => { native++; return { status: 200, ok: true, headers: new Map() }; }, [old]);
+  assert.equal(tab.win.window.__A429_GUARD2__, true, "the old generation really is installed first");
+  const r = await tab.fetch(DETAIL);
+  assert.equal(r.status, 200);
+  assert.equal(native, 1, "exactly one network request: the old wrapper only passes through");
+  const led = JSON.parse(profile.store.get("a429:led:detail") || "[]");
+  assert.equal(led.length, 1, "only the NEW guard reserved a slot (a still-active old guard would have booked two)");
+  assert.equal(tab.win.window.__A429_GEN__, A.GEN);
+});
+
+test("generation protocol: a NEWER generation disposes the previous one cleanly (no stacked wrappers)", async () => {
+  const profile = makeProfile();
+  let native = 0;
+  const tab = makeTab(profile, async () => { native++; return { status: 200, ok: true, headers: new Map() }; });
+  assert.equal(tab.win.window.__A429_GEN__, A.GEN);
+  tab.win.A429 = Object.assign({}, A, { GEN: A.GEN + 1 });   // pretend the next generation ships
+  vm.runInContext(code, tab.win);
+  assert.equal(tab.win.window.__A429_GEN__, A.GEN + 1, "the newer generation is installed");
+  const r = await tab.fetch(DETAIL);
+  assert.equal(r.status, 200);
+  assert.equal(native, 1);
+  assert.equal(JSON.parse(profile.store.get("a429:led:detail") || "[]").length, 1, "one slot: the old guard was removed, not stacked");
+});
+
+test("generation protocol: the same generation never installs twice", async () => {
+  const profile = makeProfile();
+  let native = 0;
+  const tab = makeTab(profile, async () => { native++; return { status: 200, ok: true, headers: new Map() }; });
+  vm.runInContext(code, tab.win); // injected again (e.g. protectOpenTabs on a tab that already has it)
+  await tab.fetch(DETAIL);
+  assert.equal(JSON.parse(profile.store.get("a429:led:detail") || "[]").length, 1);
+  assert.equal(native, 1);
 });
