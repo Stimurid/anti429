@@ -39,10 +39,27 @@
   };
   const isGenerating = () => !!document.querySelector(
     'button[data-testid="stop-button"], button[aria-label="Stop streaming"], button[aria-label*="Stop"], button[aria-label*="Останов"]');
+  // A tab that is ALREADY showing the error block when the extension (re)starts has no history-failed event to
+  // tell us so: look for the block itself, rarely (visible tabs only, every 30 s) and cheaply (text nodes of <main>).
+  let lastBannerAt = 0, lastBanner = false;
+  const bannerPresent = force => {
+    const now = Date.now();
+    if (!force && now - lastBannerAt < 30000) return lastBanner;
+    if (document.visibilityState === "hidden" && !force) return lastBanner;
+    lastBannerAt = now;
+    try {
+      const root = document.querySelector("main") || document.body;
+      if (!root) return (lastBanner = false);
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let found = false;
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) { if (BANNER.test(n.nodeValue || "")) { found = true; break; } }
+      return (lastBanner = found);
+    } catch { return (lastBanner = false); }
+  };
   let lastState = "";
   const reportState = force => {
     try {
-      const st = { draft: composerHasDraft(), generating: isGenerating() };
+      const st = { draft: composerHasDraft(), generating: isGenerating(), banner: bannerPresent(force) };
       const key = JSON.stringify(st);
       if (!force && key === lastState) return;
       lastState = key;

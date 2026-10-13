@@ -36,6 +36,11 @@ if(q.get('resume')) (async()=>{
   const r=await fetch('/backend-api/f/conversation/resume',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversation_id:id,offset:5})});
   document.title='resume '+r.status+' '+(r.headers.get('content-type')||'');
 })();
+if(q.get('stuck')) {
+  document.title='stuck';
+  document.body.insertAdjacentHTML('beforeend','<main><div id="e">Could not load this ChatGPT conversation <button id="retry">Try again</button></div></main>');
+  document.getElementById('retry').onclick=()=>{ document.title='stuck healed'; document.getElementById('e').remove(); };
+}
 if(q.get('broken')) {
   document.body.insertAdjacentHTML('beforeend','<main><section id="ans">Assistant answer text <button id="decoy">Try again</button></section></main>');
   document.getElementById('decoy').onclick=()=>{document.title='DECOY CLICKED'};
@@ -374,6 +379,16 @@ try {
   const fin = await titleOf("brk1");
   check("the decoy 'Try again' inside the answer was NOT clicked", fin && !/DECOY/.test(fin.t), fin && fin.t);
   check("exactly one heal was needed: 3 failed attempts + 1 success on the mock", lim.brk === 4, { brkCalls: lim.brk });
+  // 8b) a tab that is ALREADY stuck on the error block (no guard event ever reached the worker) is noticed and healed too
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await sleep(1500);
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/stuck1?stuck=1', active:true}).then(t=>t.id)");
+  let noticed = false;
+  for (let i = 0; i < 40 && !noticed; i++) { const t = await titleOf("stuck1"); const sn = await snap(); noticed = t && sn.tabs[t.id] && sn.tabs[t.id].broken; if (!noticed) await sleep(1000); }
+  check("a tab already showing the error block is noticed by the bridge (no network event needed)", !!noticed, noticed);
+  let stuckHealed = false;
+  for (let i = 0; i < 60 && !stuckHealed; i++) { const t = await titleOf("stuck1"); stuckHealed = t && /^stuck healed/.test(t.t); if (!stuckHealed) await sleep(1000); }
+  check("...and it is revived by clicking the page's own Try again", stuckHealed);
   await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });

@@ -418,7 +418,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "a429_tabstate": {
         const id = sender.tab && sender.tab.id;
-        if (id != null && msg.state) { P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating }; persistSoon(); }
+        if (id != null && msg.state) {
+          P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating };
+          // the page itself shows the error block (e.g. it was already stuck when the extension started)
+          if (msg.state.banner && !B[id]) B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() - 5000, status: 429, seenOnPage: true };
+          persistSoon();
+        }
         return sendResponse({ ok: true });
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
