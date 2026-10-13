@@ -36,6 +36,15 @@ if(q.get('resume')) (async()=>{
   const r=await fetch('/backend-api/f/conversation/resume',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversation_id:id,offset:5})});
   document.title='resume '+r.status+' '+(r.headers.get('content-type')||'');
 })();
+if(q.get('zombie')) (async()=>{
+  for(let i=0;i<40;i++){
+    const st=await fetch('/backend-api/conversation/'+id+'/stream_status').then(r=>r.json()).catch(()=>({}));
+    if(st.status!=='IS_STREAMING'){ document.title='zombie settled '+st.status; const r=await fetch('/backend-api/conversations/'+id).then(r=>r.status).catch(()=>0); document.title='zombie loaded '+r; return; }
+    await fetch('/backend-api/f/conversation/resume',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversation_id:id,offset:5})}).catch(()=>{});
+    await new Promise(r=>setTimeout(r,800));
+  }
+  document.title='zombie gave up';
+})();
 if(q.get('stuck')) {
   document.title='stuck';
   document.body.insertAdjacentHTML('beforeend','<main><div id="e">Could not load this ChatGPT conversation <button id="retry">Try again</button></div></main>');
@@ -96,7 +105,8 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
     return req.on("end", () => {
       let off = -1; try { off = JSON.parse(raw).offset; } catch {}
       lim.resumeCalls = (lim.resumeCalls || []).concat(off);
-      if (off !== 0) { res.statusCode = 404; return res.end(); }
+      lim.resumeTotal = (lim.resumeTotal || 0) + 1;
+      if (off !== 0 || /zombie/.test(raw)) { res.statusCode = 404; return res.end(); }
       res.setHeader("content-type", "text/event-stream");
       res.end('data: {"type":"resume_conversation_token","token":"t"}\n\ndata: {"v":{"message":{"author":{"role":"assistant"}}}}\n\n');
     });
@@ -390,6 +400,35 @@ try {
   for (let i = 0; i < 60 && !stuckHealed; i++) { const t = await titleOf("stuck1"); stuckHealed = t && /^stuck healed/.test(t.t); if (!stuckHealed) await sleep(1000); }
   check("...and it is revived by clicking the page's own Try again", stuckHealed);
   await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
+
+  // 9) zombie stream: server says IS_STREAMING forever, resume is always 404 (observed on the real site)
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
+  await sleep(1500);
+  await resetMock();
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/zombie1?zombie=1', active:true}).then(t=>t.id)");
+  let zdone = false, zt = null;
+  for (let i = 0; i < 90 && !zdone; i++) { zt = await titleOf("zombie1"); zdone = zt && /^zombie loaded/.test(zt.t); if (!zdone) await sleep(1000); }
+  check("zombie chat: after the breaker trips the page stops looping, gets COMPLETE and loads the history", zdone, zt && zt.t);
+  check("the page did NOT hammer the server forever (bounded number of resume POSTs)", (lim.resumeTotal || 0) <= 14, { resumePosts: lim.resumeTotal });
+  const zsn = await snap();
+  check("the tab is flagged 'dead stream' in the dashboard", zt && zsn.tabs[zt.id] && zsn.tabs[zt.id].deadStream > 0, zt && zsn.tabs[zt.id]);
+
+  // 10) manual "mark as stuck": the user does not want to wait for two failed recoveries
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { deadAfter: 99 } }); // automatic breaker effectively off for this tab
+  await sleep(1500);
+  await resetMock();
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/6acbd9ff-5b94-83ea-b5c9-455b40c38d01?zombie=1', active:true}).then(t=>t.id)");
+  let sawStreaming = false, zt2 = null;
+  for (let i = 0; i < 30 && !sawStreaming; i++) { zt2 = await titleOf("6acbd9ff"); const sn = await snap(); sawStreaming = zt2 && sn.tabs[zt2.id] && sn.tabs[zt2.id].streaming >= 0; if (!sawStreaming) await sleep(500); }
+  check("the dashboard knows the server reports IS_STREAMING for that tab", sawStreaming);
+  const md = await call({ type: "markDead", id: zt2.id });
+  check("markDead is accepted by the page bridge", md && md.ok === true, md);
+  let settled = false, zt3 = null;
+  for (let i = 0; i < 40 && !settled; i++) { zt3 = await titleOf("6acbd9ff"); settled = zt3 && /^zombie loaded/.test(zt3.t); if (!settled) await sleep(1000); }
+  check("after the manual mark the (reloaded) page gets COMPLETE immediately and loads the chat", settled, zt3 && zt3.t);
+  await call({ type: "setCfg", patch: { deadAfter: 2 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));

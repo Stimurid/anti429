@@ -31,6 +31,8 @@ const P = {};   // tabId -> { draft, generating } reported by bridge.js
 const G = {};   // tabId -> true once guard.js announced itself in that tab
 const R = {};   // tabId -> number of successful resume recoveries
 const B = {};   // tabId -> { failedAt, status, heals, lastHealAt }  pages that were shown a failed history load
+const D = {};   // tabId -> ts the guard declared that tab's stream dead
+const S = {};   // tabId -> { status, since }  last stream_status seen on that page
 let lastHealAny = 0;
 let dirty = false;
 
@@ -164,8 +166,8 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   scheduleRender();
 }, { urls: URLS }, ["responseHeaders"]);
 
-chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; persistSoon(); });
-chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; delete B[id]; } });
+chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; persistSoon(); });
+chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
 
 // ---------- snapshot / render ----------
 function famRow(id, now) {
@@ -199,13 +201,15 @@ function snapshot() {
     tabs[id] = stats;
   }
   for (const [id, n] of Object.entries(H)) if (n && !tabs[id]) tabs[id] = { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: n, loop: false };
-  const ids = new Set([...Object.keys(tabs), ...Object.keys(P), ...Object.keys(G), ...Object.keys(R), ...Object.keys(B)]);
+  const ids = new Set([...Object.keys(tabs), ...Object.keys(P), ...Object.keys(G), ...Object.keys(R), ...Object.keys(B), ...Object.keys(D), ...Object.keys(S)]);
   for (const id of ids) {
     const t = tabs[id] || (tabs[id] = { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: 0, loop: false });
     t.draft = !!(P[id] && P[id].draft);
     t.generating = !!(P[id] && P[id].generating);
     t.guard = !!G[id];
     t.recovered = R[id] || 0;
+    t.deadStream = D[id] ? Math.round((now - D[id]) / 1000) : 0;
+    t.streaming = S[id] && S[id].status === "IS_STREAMING" ? Math.round((now - S[id].since) / 60000) : -1;
     t.broken = B[id] ? { status: B[id].status, heals: B[id].heals || 0, agoSec: Math.round((now - B[id].failedAt) / 1000) } : null;
   }
   return { now, fams, overall: A.worstLevel(fams.map(r => r.level)), tabs, cfg, families: A.FAMILIES };
@@ -412,6 +416,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           else if (msg.ev.type === "history-failed") {
             if (A.isHealableStatus(msg.ev.status)) B[id] = Object.assign({ heals: 0, lastHealAt: 0 }, B[id], { failedAt: Date.now(), status: msg.ev.status });
           } else if (msg.ev.type === "history-ok") delete B[id];
+          else if (msg.ev.type === "dead-stream") D[id] = Date.now();
+          else if (msg.ev.type === "stream-status") {
+            const st = msg.ev.status;
+            if (!S[id] || S[id].status !== st) S[id] = { status: st, since: Date.now() };
+            if (st === "COMPLETE") delete D[id];
+          }
           persistSoon(); scheduleRender();
         }
         return sendResponse({ ok: true });
@@ -428,6 +438,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
       case "healNow": return sendResponse(await healTab(msg.id, true));
+      case "markDead": {
+        // the user says: this chat's stream is stuck. Flag it dead for 20 min and reload the tab ONCE.
+        let res = null;
+        try { res = await chrome.tabs.sendMessage(msg.id, { type: "a429_markdead" }); } catch {}
+        if (res && res.ok) {
+          D[msg.id] = Date.now();
+          setTimeout(() => { chrome.tabs.reload(msg.id).catch(() => {}); }, 400);
+        }
+        return sendResponse(res || { ok: false, reason: "no-bridge" });
+      }
+      case "undead": {
+        let res = null;
+        try { res = await chrome.tabs.sendMessage(msg.id, { type: "a429_undead" }); } catch {}
+        delete D[msg.id];
+        return sendResponse(res || { ok: false });
+      }
       case "openWindow": {
         const { dashWin, dashBounds, dashSide } = await chrome.storage.local.get(["dashWin", "dashBounds", "dashSide"]);
         const side = msg.side || null;

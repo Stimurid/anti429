@@ -221,3 +221,82 @@ test("abort during the grace wait rejects and leaves no recovery in flight", asy
   await assert.rejects(p, e => e.name === "AbortError");
   assert.equal(tab.win.window.__A429_RECOVERY_STATE__().inFlight, 0);
 });
+
+// ---- dead-stream circuit breaker ----
+const zombieBackend = () => backend({ resumeHandler: () => new Response("", { status: 404 }) });
+
+test("breaker: recovery EXHAUSTED twice for one conversation -> stream_status is answered locally with COMPLETE", async () => {
+  const b = zombieBackend();
+  const tab = makeTab(makeProfile(), b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  await tab.fetch(RESUME, resumeInit(5));        // exhausted #1
+  assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "IS_STREAMING" }, "one failure is not enough");
+  await tab.fetch(RESUME, resumeInit(5));        // exhausted #2 -> dead
+  const before = b.calls.status;
+  const r = await tab.fetch(STATUS);
+  assert.equal(r.status, 200);
+  assert.deepEqual(JSON.parse(await r.text()), { status: "COMPLETE" });
+  assert.equal(b.calls.status, before, "answered locally: no network request");
+  assert.ok(tab.events.some(e => e.type === "dead-stream"));
+});
+
+test("breaker: once dead, resume is not retried any more (no extra POSTs)", async () => {
+  const b = zombieBackend();
+  const tab = makeTab(makeProfile(), b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  await tab.fetch(RESUME, resumeInit(5)); await tab.fetch(RESUME, resumeInit(5));
+  const posts = b.calls.resume.length;
+  await tab.fetch(RESUME, resumeInit(5));
+  assert.equal(b.calls.resume.length, posts + 1, "only the page's own POST, no recovery attempts");
+  assert.ok(tab.events.some(e => e.reason === "dead-stream"));
+});
+
+test("breaker: shared through localStorage - another tab and a reloaded page see the dead flag", async () => {
+  const profile = makeProfile();
+  const b = zombieBackend();
+  const a = makeTab(profile, b.impl);
+  await a.fetch(STATUS); await sleep(20);
+  await a.fetch(RESUME, resumeInit(5)); await a.fetch(RESUME, resumeInit(5));
+  const reloaded = makeTab(profile, b.impl);       // a fresh page of the same origin
+  const r = await reloaded.fetch(STATUS);
+  assert.deepEqual(JSON.parse(await r.text()), { status: "COMPLETE" });
+});
+
+test("breaker: a finished conversation (WebSocket turn-complete) clears it", async () => {
+  const profile = makeProfile();
+  const b = zombieBackend();
+  const tab = makeTab(profile, b.impl);
+  new tab.win.WebSocket("wss://x");
+  await tab.fetch(STATUS); await sleep(20);
+  await tab.fetch(RESUME, resumeInit(5)); await tab.fetch(RESUME, resumeInit(5));
+  assert.ok(profile.store.get("a429:dead:c1"), "dead flag set");
+  FakeWS.last.emit({ type: "message", topic_id: "conversations", payload: { type: "conversation-turn-complete", payload: { conversation_id: "c1" } } });
+  assert.equal(profile.store.get("a429:dead:c1"), undefined, "cleared by turn-complete");
+});
+
+test("breaker: the dead flag expires by itself", async () => {
+  const profile = makeProfile({ deadMs: 80 });
+  const b = zombieBackend();
+  const tab = makeTab(profile, b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  await tab.fetch(RESUME, resumeInit(5)); await tab.fetch(RESUME, resumeInit(5));
+  assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "COMPLETE" });
+  await sleep(120);
+  assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "IS_STREAMING" }, "real status is served again");
+});
+
+test("breaker: off switch (cfg2.deadStream=false) keeps the old behaviour", async () => {
+  const b = zombieBackend();
+  const tab = makeTab(makeProfile({ deadStream: false }), b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  await tab.fetch(RESUME, resumeInit(5)); await tab.fetch(RESUME, resumeInit(5));
+  assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "IS_STREAMING" });
+});
+
+test("breaker: a stream that DOES resume is never declared dead", async () => {
+  const b = backend({ resumeHandler: (off, n) => (n % 2 === 1 ? new Response("", { status: 404 }) : SSE(GOOD_SSE)) });
+  const tab = makeTab(makeProfile(), b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  for (let i = 0; i < 3; i++) { const r = await tab.fetch(RESUME, resumeInit(5)); assert.equal(r.status, 200); }
+  assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "IS_STREAMING" });
+});

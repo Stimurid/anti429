@@ -62,6 +62,8 @@ function renderTabs() {
     if (s.draft) chips.push(el("span", { class: "chip draft", text: "✎ черновик", title: "В поле ввода есть неотправленный текст" }));
     if (s.generating) chips.push(el("span", { class: "chip gen", text: "⏵ идёт ответ", title: "Сейчас генерируется ответ" }));
     if (s.recovered) chips.push(el("span", { class: "chip rec", text: `↻ ${s.recovered}`, title: "Сколько раз восстановлен поток после resume-404" }));
+    if (s.deadStream) chips.push(el("span", { class: "chip warn", text: "☠ поток завис: игнорирую", title: "Сервер «ведёт» генерацию, но возобновить её не удаётся (resume 404 несколько раз). Расширение отвечает странице, что поток завершён, чтобы она перестала долбить лимит. Снимается само через 20 минут." }));
+    else if (s.streaming >= 10) chips.push(el("span", { class: "chip hold", text: `⏵ поток идёт ${s.streaming} мин`, title: "Сервер уже давно сообщает IS_STREAMING для этого чата: возможно, генерация зависла." }));
     if (s.broken) chips.push(el("span", { class: "chip warn", text: `⚠ не загрузилась${s.broken.heals ? ` · лечу ×${s.broken.heals}` : ""}`, title: `История вернула ${s.broken.status}. Расширение само нажмёт «Try again», когда лимит успокоится.` }));
     if (!t.discarded && !s.guard) chips.push(el("span", { class: "chip noguard", text: "без защиты", title: "Защита не подключена к этой вкладке — нажмите «Защитить открытые вкладки»" }));
     const m = el("div", { class: "m" },
@@ -81,6 +83,10 @@ function renderTabs() {
           await send({ type: "discard", ids: [t.id], force: risky });
           refresh();
         } }),
+      (!s.deadStream && s.streaming >= 0) ? el("button", { class: "small", text: "Считать зависшим", title: "Сервер говорит, что в этом чате идёт генерация. Если она висит часами: пометить поток мёртвым на 20 минут и один раз перезагрузить вкладку. Страница получит «завершено» и откроет чат как обычно.",
+        onclick: async () => { await send({ type: "markDead", id: t.id }); refresh(); } }) : null,
+      s.deadStream ? el("button", { class: "small ghost", text: "Снять игнор", title: "Перестать подменять статус потока для этой вкладки",
+        onclick: async () => { await send({ type: "undead", id: t.id }); refresh(); } }) : null,
       s.broken ? el("button", { class: "small", text: "Повторить", title: "Нажать «Try again» на этой вкладке сейчас",
         onclick: async () => { await send({ type: "healNow", id: t.id }); refresh(); } }) : null,
       el("button", { class: "small ghost", text: "✕", title: "Закрыть вкладку",

@@ -92,6 +92,20 @@
   };
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.type === "a429_markdead" && sender.id === chrome.runtime.id) {
+        const m = location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
+        if (!m) { sendResponse({ ok: false, reason: "no-conversation-in-url" }); return; }
+        try { localStorage.setItem(NS + "dead:" + m[1], String(Date.now() + 20 * 60 * 1000)); } catch {}
+        sendResponse({ ok: true });
+        return;
+      }
+      if (msg && msg.type === "a429_undead" && sender.id === chrome.runtime.id) {
+        try {
+          for (const k of Object.keys(localStorage)) if (k.startsWith(NS + "dead:") || k.startsWith(NS + "ex:")) localStorage.removeItem(k);
+        } catch {}
+        sendResponse({ ok: true });
+        return;
+      }
       if (!msg || msg.type !== "a429_heal" || sender.id !== chrome.runtime.id) return;
       try { sendResponse(healNow()); } catch (e) { sendResponse({ clicked: false, reason: "error" }); }
     });

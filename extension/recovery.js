@@ -39,9 +39,9 @@
   const T = ms => Math.max(1, Math.round(ms * (Number(cfg().timeScale) || 1))); // timeScale is a test hook
   const active = () => { const c = cfg(); return c.enabled !== false && c.recovery !== false; };
 
-  const stats = { resume404: 0, attempts: 0, success: 0, suppressed: 0, skipped: 0, exhausted: 0, stopped: 0 };
+  const stats = { resume404: 0, attempts: 0, success: 0, suppressed: 0, skipped: 0, exhausted: 0, stopped: 0, dead: 0, deadServed: 0 };
   const STAT_OF = { "resume-404": "resume404", "resume-recovery-attempt": "attempts", "resume-recovery-success": "success",
-    "resume-recovery-suppressed": "suppressed", "resume-recovery-skipped": "skipped", "resume-recovery-exhausted": "exhausted", "resume-recovery-stopped": "stopped" };
+    "resume-recovery-suppressed": "suppressed", "resume-recovery-skipped": "skipped", "resume-recovery-exhausted": "exhausted", "resume-recovery-stopped": "stopped", "dead-stream": "dead" };
   const emit = (type, data) => {
     if (STAT_OF[type]) stats[STAT_OF[type]]++;
     try {
@@ -71,6 +71,39 @@
   const inFlight = new Set();       // conversations being recovered by THIS tab
   const listeners = new Set();
   let seq = 0;
+
+  // ---- dead-stream circuit breaker ----
+  // Observed on the real site: a conversation whose server-side stream is stuck answers stream_status IS_STREAMING
+  // forever (finished chats answer COMPLETE) while resume keeps returning 404. The page then loops: resume 404 ->
+  // poll status -> re-download history -> 429 ... and the chat never opens. After the recovery above has been
+  // EXHAUSTED `deadAfter` times in 10 minutes for one conversation we declare the stream dead for `deadMs` and answer
+  // stream_status locally with COMPLETE, so the page stops resuming and simply renders the conversation.
+  const deadOn = () => { const c = cfg(); return c.enabled !== false && c.deadStream !== false; };
+  const deadKey = conv => NS + "dead:" + conv;
+  const deadActive = conv => {
+    if (!deadOn() || !conv) return false;
+    try {
+      const v = Number(localStorage.getItem(deadKey(conv)));
+      if (v > Date.now()) return true;
+      if (v) localStorage.removeItem(deadKey(conv));
+    } catch {}
+    return false;
+  };
+  const clearDead = conv => { try { localStorage.removeItem(deadKey(conv)); localStorage.removeItem(NS + "ex:" + conv); } catch {} };
+  const noteExhausted = conv => {
+    if (!deadOn() || !conv) return;
+    const c = cfg();
+    const now = Date.now();
+    const need = Number(c.deadAfter) || 2;
+    let arr = [];
+    try { arr = JSON.parse(localStorage.getItem(NS + "ex:" + conv) || "[]").filter(t => now - t < 10 * 60 * 1000); } catch {}
+    arr.push(now);
+    try { localStorage.setItem(NS + "ex:" + conv, JSON.stringify(arr)); } catch {}
+    if (arr.length >= need) {
+      try { localStorage.setItem(deadKey(conv), String(now + (Number(c.deadMs) || 20 * 60 * 1000))); localStorage.removeItem(NS + "ex:" + conv); } catch {}
+      emit("dead-stream", {});
+    }
+  };
   const bump = (conv, type) => { for (const l of [...listeners]) { try { l({ conv, type }); } catch {} } };
   const clean = () => {
     const cut = Date.now() - TTL_MS;
@@ -134,7 +167,9 @@
       if (!raw.trim()) return;
       const p = JSON.parse(raw);
       const status = String(typeof p.status === "string" ? p.status : (typeof p.stream_status === "string" ? p.stream_status : "unknown")).slice(0, 64);
+      const prevSt = streamStatus.get(conv);
       streamStatus.set(conv, { status, at: Date.now() });
+      if (!prevSt || prevSt.status !== status) emit("stream-status", { status });
       clean();
     } catch {}
   }
@@ -194,6 +229,7 @@
     const meta = await metaP;
     if (!retryReq || !meta) { emit("resume-recovery-skipped", { reason: "unsupported-request" }); return null; }
     const { conv, body, offset } = meta;
+    if (deadActive(conv)) { emit("resume-recovery-skipped", { reason: "dead-stream" }); return null; }
     const st = streamStatus.get(conv);
     const age = st ? Date.now() - st.at : null;
     if (!(st && st.status === "IS_STREAMING" && age >= 0 && age <= STREAMING_MAX_AGE_MS)) {
@@ -233,9 +269,11 @@
         const v = await validateStream(resp, signal);
         if (!v.ok) { emit("resume-recovery-stopped", { attempt, reason: v.reason }); return null; }
         emit("resume-recovery-success", { attempt, offset: next, status: resp.status });
+        clearDead(conv);
         return resp;
       }
       emit("resume-recovery-exhausted", { attempts: attempt });
+      noteExhausted(conv);
       return null;
     };
 
@@ -266,6 +304,10 @@
     const detailConv = convFromDetail(info.method, info.url);
     const isResume = info.method === "POST" && info.url.pathname === "/backend-api/f/conversation/resume";
     if (!statusConv && !detailConv && !isResume) return nativeFetch(input, init);
+    if (statusConv && deadActive(statusConv)) {
+      stats.deadServed++;
+      return Promise.resolve(new Response(JSON.stringify({ status: "COMPLETE" }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
 
     if (detailConv) detailInFlight.set(detailConv, (detailInFlight.get(detailConv) || 0) + 1);
     const finishDetail = ok => {
@@ -308,7 +350,7 @@
     if (Array.isArray(f)) { f.forEach(inspectFrame); return; }
     if (f.type === "message" && f.topic_id === "conversations" && f.payload && f.payload.type === "conversation-turn-complete") {
       const conv = f.payload.payload && f.payload.payload.conversation_id;
-      if (typeof conv === "string") { completion.set(conv, { at: Date.now(), seq: ++seq }); bump(conv, "complete"); }
+      if (typeof conv === "string") { completion.set(conv, { at: Date.now(), seq: ++seq }); clearDead(conv); bump(conv, "complete"); }
     }
     if (f.type === "reply" && f.reply && Array.isArray(f.reply.catchups)) f.reply.catchups.forEach(inspectFrame);
   };
