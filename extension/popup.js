@@ -1,6 +1,8 @@
 // 4̅2̅9̅ popup. All text from tabs is inserted via textContent (chat titles are untrusted data).
 "use strict";
 const A = self.A429;
+const MODE = new URLSearchParams(location.search).get("mode") || "popup"; // popup | window | panel
+document.documentElement.dataset.mode = MODE;
 const $ = id => document.getElementById(id);
 const send = msg => chrome.runtime.sendMessage(msg);
 
@@ -155,6 +157,23 @@ $("btnProtect").onclick = async () => {
 };
 $("btnSave").onclick = async () => { await send({ type: "saveSession" }); refresh(); };
 $("btnCancel").onclick = async () => { await send({ type: "cancelRestore" }); refresh(); };
+const dock = side => async () => {
+  // screen.avail* = usable desktop area of the monitor this window is on (excludes the taskbar)
+  const scr = { left: screen.availLeft || 0, top: screen.availTop || 0, width: screen.availWidth, height: screen.availHeight };
+  await send({ type: "openWindow", side, screen: scr });
+  if (MODE === "popup") window.close();
+};
+$("btnWinL").onclick = dock("left");
+$("btnWinR").onclick = dock("right");
+$("btnPanelSide").onclick = () => chrome.tabs.create({ url: "chrome://settings/appearance" });
+$("btnPanel").onclick = async () => {
+  // sidePanel.open() needs the user gesture of this very click, so it must be called here, not in the worker.
+  try {
+    const w = await chrome.windows.getCurrent();
+    await chrome.sidePanel.open({ windowId: w.id });
+    if (MODE === "popup") window.close();
+  } catch (e) { alert("Не удалось открыть боковую панель: " + (e && e.message || e)); }
+};
 $("btnReset").onclick = async () => { await send({ type: "resetLearned" }); refresh(); };
 $("chkEnabled").onchange = async e => { await send({ type: "setCfg", patch: { enabled: e.target.checked } }); };
 $("gap").onchange = async e => { await send({ type: "setCfg", patch: { restoreGapSec: Math.max(3, Number(e.target.value) || 12) } }); };

@@ -373,6 +373,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse({ ok: true });
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
+      case "openWindow": {
+        const { dashWin, dashBounds, dashSide } = await chrome.storage.local.get(["dashWin", "dashBounds", "dashSide"]);
+        const side = msg.side || null;
+        const scr = msg.screen || null;
+        const width = Math.max(380, (dashBounds && dashBounds.width) || 520);
+        // Dock to a screen edge at full usable height when a side is requested; otherwise reuse last size/position.
+        let box;
+        if (side && scr) {
+          box = { width, height: scr.height, top: scr.top, left: side === "right" ? scr.left + scr.width - width : scr.left };
+        } else {
+          box = dashBounds ? { width: dashBounds.width, height: dashBounds.height, left: dashBounds.left, top: dashBounds.top } : { width, height: 900 };
+        }
+        if (dashWin != null) {
+          try {
+            await chrome.windows.update(dashWin, Object.assign({ focused: true, state: "normal" }, side ? box : {}));
+            if (side) await chrome.storage.local.set({ dashSide: side });
+            return sendResponse({ reused: true, side: side || dashSide || null });
+          } catch {}
+        }
+        const w = await chrome.windows.create(Object.assign({ url: chrome.runtime.getURL("popup.html?mode=window"), type: "popup" }, box));
+        await chrome.storage.local.set({ dashWin: w.id, dashSide: side || dashSide || null });
+        return sendResponse({ windowId: w.id, side, left: w.left, width: w.width });
+      }
       case "forgetGuards": { for (const k of Object.keys(G)) delete G[k]; return sendResponse({ ok: true }); } // diagnostic: mimics what an extension reload does to the worker's memory
       case "snapshot": {
         probeGuards(false).catch(() => {});
@@ -440,3 +463,17 @@ chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); setTimeou
 render().catch(() => {});
 
 setTimeout(() => probeGuards(true).catch(() => {}), 2000); // service worker (re)start: re-learn which tabs already run the guard
+
+// Remember the dashboard window's size/position so the next one opens exactly where the user left it.
+let boundsTimer = null;
+chrome.windows.onBoundsChanged.addListener(win => {
+  clearTimeout(boundsTimer);
+  boundsTimer = setTimeout(async () => {
+    const { dashWin } = await chrome.storage.local.get("dashWin");
+    if (win.id === dashWin) chrome.storage.local.set({ dashBounds: { width: win.width, height: win.height, left: win.left, top: win.top } });
+  }, 600);
+});
+chrome.windows.onRemoved.addListener(async id => {
+  const { dashWin } = await chrome.storage.local.get("dashWin");
+  if (id === dashWin) chrome.storage.local.remove("dashWin");
+});

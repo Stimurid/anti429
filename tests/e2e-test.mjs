@@ -196,6 +196,12 @@ try {
   const resumeTab = await openTab("https://chatgpt.com/c/resume1?resume=1");
   const frontTab = await openTab("https://chatgpt.com/c/front1");
   await sleep(7000);
+  // the resume tab may legitimately wait in the guard's queue: poll for its result instead of a fixed sleep
+  for (let i = 0; i < 30; i++) {
+    const t = (await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>ts.map(x=>({url:x.url,title:x.title})))")).find(x => x.url.includes("resume1"));
+    if (t && /^resume /.test(t.title)) break;
+    await sleep(1000);
+  }
   s = await snap();
   const tl2 = await tabsList();
   const byFrag = frag => tl2.find(t => t.url.includes(frag));
@@ -246,6 +252,40 @@ try {
   check("after the worker forgot, the probe re-learned every live tab (no false 'без защиты')", liveNow.length >= 3 && unprot.length === 0, { live: liveNow.length, wasFlagged: flaggedBefore, stillUnprotected: unprot });
   const prot = await call({ type: "protectTabs" });
   check("'Protect open tabs' injects nothing twice when everything is already protected", prot.injected === 0, prot);
+
+  // 6) resizable dashboard: separate window + side panel (the toolbar popup is hard-capped by Chrome at ~600 px)
+  const popMode = await ev(pop, "JSON.stringify({mode:document.documentElement.dataset.mode,w:Math.round(document.body.getBoundingClientRect().width),btnWin:getComputedStyle(document.getElementById('btnWinL')).display,btnPanel:getComputedStyle(document.getElementById('btnPanel')).display})");
+  const pm = JSON.parse(popMode);
+  check("toolbar popup keeps its compact 430px layout and shows both expand buttons", pm.mode === "popup" && pm.w === 430 && pm.btnWin !== "none" && pm.btnPanel !== "none", pm);
+  const scr = JSON.parse(await ev(pop, "JSON.stringify({left:screen.availLeft||0,top:screen.availTop||0,width:screen.availWidth,height:screen.availHeight})"));
+  const ow = await call({ type: "openWindow", side: "right", screen: scr });
+  check("openWindow creates a dashboard window", ow && ow.windowId != null, ow);
+  await sleep(2500);
+  const lst = await dbg("/json/list");
+  const winPage = lst.find(t => t.type === "page" && t.url.includes("popup.html?mode=window"));
+  check("dashboard window page exists", !!winPage, winPage && winPage.url);
+  if (winPage) {
+    const wc = await cdp(winPage.webSocketDebuggerUrl);
+    await wc.send("Runtime.enable");
+    await wc.send("Emulation.setDeviceMetricsOverride", { width: 560, height: 1100, deviceScaleFactor: 1, mobile: false });
+    await sleep(1500);
+    const info = JSON.parse(await ev(wc, "JSON.stringify({mode:document.documentElement.dataset.mode,maxH:getComputedStyle(document.body).maxHeight,bodyW:Math.round(document.body.getBoundingClientRect().width),vw:innerWidth,btnWin:getComputedStyle(document.getElementById('btnWinL')).display,btnPanel:getComputedStyle(document.getElementById('btnPanel')).display,tabRows:document.querySelectorAll('.tab').length,docH:document.documentElement.scrollHeight})"));
+    check("window mode: no height cap, fluid width, dock buttons still available", info.mode === "window" && info.maxH === "none" && info.bodyW <= info.vw && info.bodyW >= info.vw - 20 && info.btnWin !== "none" && info.btnPanel !== "none", info);
+    check("window mode shows many tab rows at once (not 3)", info.tabRows >= 6 && info.docH > 600, { rows: info.tabRows, docH: info.docH });
+    const sh = await wc.send("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(outDir, "e2e-window.png"), Buffer.from(sh.data, "base64"));
+    wc.close();
+  }
+  const wRight = await ev(pop, "chrome.windows.getAll().then(ws=>JSON.stringify(ws.filter(w=>w.type==='popup').map(w=>({left:w.left,top:w.top,width:w.width,height:w.height}))))");
+  const rw = JSON.parse(wRight)[0];
+  check("dock RIGHT: window hugs the right edge of the usable screen at (almost) full height", rw && Math.abs(rw.left + rw.width - (scr.left + scr.width)) <= 20 && rw.height >= scr.height - 80, { win: rw, scr });
+  const ow2 = await call({ type: "openWindow", side: "left", screen: scr });
+  check("a second openWindow re-docks the existing window instead of opening another", ow2 && ow2.reused === true && ow2.side === "left", ow2);
+  await sleep(800);
+  const leftWins = JSON.parse(await ev(pop, "chrome.windows.getAll().then(ws=>JSON.stringify(ws.filter(w=>w.type==='popup').map(w=>({left:w.left,width:w.width}))))"));
+  check("dock LEFT: same single window moved to the left edge", leftWins.length === 1 && Math.abs(leftWins[0].left - scr.left) <= 20, { popups: leftWins, scrLeft: scr.left });
+  const sp = await ev(pop, "chrome.sidePanel.getOptions({}).then(o=>JSON.stringify(o))");
+  check("side panel is registered with the panel-mode page", /mode=panel/.test(sp), sp);
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));
