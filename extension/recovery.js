@@ -232,8 +232,9 @@
     if (deadActive(conv)) { emit("resume-recovery-skipped", { reason: "dead-stream" }); return null; }
     const st = streamStatus.get(conv);
     const age = st ? Date.now() - st.at : null;
-    if (!(st && st.status === "IS_STREAMING" && age >= 0 && age <= STREAMING_MAX_AGE_MS)) {
-      emit("resume-recovery-skipped", { reason: st && st.status === "IS_STREAMING" ? "stale-streaming-evidence" : "no-recent-streaming" });
+    const liveish = st && (st.status === "IS_STREAMING" || st.status === "IS_STOP_REQUESTED");
+    if (!(liveish && age >= 0 && age <= STREAMING_MAX_AGE_MS)) {
+      emit("resume-recovery-skipped", { reason: liveish ? "stale-streaming-evidence" : "no-recent-streaming" });
       return null;
     }
     if (inFlight.has(conv)) { emit("resume-recovery-skipped", { reason: "concurrent" }); return null; }

@@ -167,3 +167,16 @@ test("versionGreater: numeric component-wise comparison, junk never wins", () =>
   assert.equal(A.versionGreater(undefined, "0.4.1"), false);
   assert.equal(A.versionGreater("0.4.x", "0.4.1"), false);
 });
+
+test("shouldAutoStop: conservative - needs opt-in, a dead stream, long IS_STREAMING and a cooldown", () => {
+  const now = 10 * 3600 * 1000;
+  const base = { status: "IS_STREAMING", since: now - 50 * 60000, dead: true, lastStopAt: 0 };
+  assert.equal(A.shouldAutoStop(base, now, { autoStop: true, autoStopMin: 45 }), true);
+  assert.equal(A.shouldAutoStop(base, now, { autoStop: false }), false, "off by default");
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { dead: false }), now, { autoStop: true }), false, "resume still works -> maybe alive");
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { since: now - 10 * 60000 }), now, { autoStop: true, autoStopMin: 45 }), false, "not long enough");
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { status: "COMPLETE" }), now, { autoStop: true }), false);
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { status: "IS_STOP_REQUESTED" }), now, { autoStop: true }), false, "already asked to stop");
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { lastStopAt: now - 3600 * 1000 }), now, { autoStop: true }), false, "stop cooldown");
+  assert.equal(A.shouldAutoStop(Object.assign({}, base, { lastStopAt: now - 7 * 3600 * 1000 }), now, { autoStop: true }), true, "allowed again after the cooldown");
+});

@@ -10,6 +10,8 @@ const DEFAULT_CFG = {
   loopStream: 5,          // stream_status/resume / 60 s
   loopMb10: 100,          // MB transferred in 10 min
   restoreGapSec: 12,      // pause between tabs when restoring a saved session
+  autoStop: false,        // send stop_conversation for chats whose stream looks dead (OFF by default: stopping a live run destroys it)
+  autoStopMin: 45,        // ... only after IS_STREAMING was observed this long AND the resume breaker tripped
   autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
   calmMs: 30000,          // required quiet time since the last 429 before a heal
   healGapMs: 15000,       // at least this long between two heals (any tabs)
@@ -31,6 +33,7 @@ const P = {};   // tabId -> { draft, generating } reported by bridge.js
 const G = {};   // tabId -> true once guard.js announced itself in that tab
 const R = {};   // tabId -> number of successful resume recoveries
 const B = {};   // tabId -> { failedAt, status, heals, lastHealAt }  pages that were shown a failed history load
+const STOP = {}; // tabId -> { at }  when the extension last sent stop_conversation for that tab
 const D = {};   // tabId -> ts the guard declared that tab's stream dead
 const S = {};   // tabId -> { status, since }  last stream_status seen on that page
 let lastHealAny = 0;
@@ -166,7 +169,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   scheduleRender();
 }, { urls: URLS }, ["responseHeaders"]);
 
-chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; persistSoon(); });
+chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; delete STOP[id]; persistSoon(); });
 chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
 
 // ---------- snapshot / render ----------
@@ -210,6 +213,8 @@ function snapshot() {
     t.recovered = R[id] || 0;
     t.deadStream = D[id] ? Math.round((now - D[id]) / 1000) : 0;
     t.streaming = S[id] && S[id].status === "IS_STREAMING" ? Math.round((now - S[id].since) / 60000) : -1;
+    t.stopReq = S[id] && S[id].status === "IS_STOP_REQUESTED" ? Math.round((now - S[id].since) / 60000) : -1;
+    t.stoppedAgoSec = STOP[id] ? Math.round((now - STOP[id].at) / 1000) : 0;
     t.broken = B[id] ? { status: B[id].status, heals: B[id].heals || 0, agoSec: Math.round((now - B[id].failedAt) / 1000) } : null;
   }
   return { now, fams, overall: A.worstLevel(fams.map(r => r.level)), tabs, cfg, families: A.FAMILIES };
@@ -296,6 +301,30 @@ function calmNow(now) {
   return A.isCalm(A.FAMILY_IDS.map(id => ({ id, cd: F[id].cd, last429: F[id].last429, starts: F[id].starts })), now, cfg);
 }
 
+async function stopStream(id) {
+  // Reserve BEFORE sending: two overlapping ticks must never send "Stop" twice for the same chat.
+  const prev = STOP[id];
+  STOP[id] = { at: Date.now(), pending: true };
+  let res = null;
+  try { res = await chrome.tabs.sendMessage(id, { type: "a429_stop" }); } catch {}
+  if (res && res.ok) STOP[id] = { at: Date.now() };
+  else STOP[id] = prev || { at: Date.now() - 6 * 3600 * 1000 + 5 * 60 * 1000 }; // failed: the auto mode may retry in ~5 min
+  persistSoon();
+  return res || { ok: false, reason: "no-bridge" };
+}
+
+// Opt-in (cfg.autoStop): stop chats that were IS_STREAMING for autoStopMin AND whose resume kept failing.
+async function autoStopTick() {
+  if (!cfg.autoStop) return;
+  const now = Date.now();
+  for (const [sid, st] of Object.entries(S)) {
+    const id = Number(sid);
+    if (A.shouldAutoStop({ status: st.status, since: st.since, dead: !!D[id], lastStopAt: STOP[id] && STOP[id].at }, now, cfg)) {
+      await stopStream(id);
+    }
+  }
+}
+
 async function healTab(id, manual) {
   const b = B[id] || (B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() });
   b.heals = (b.heals || 0) + 1;
@@ -310,6 +339,7 @@ async function healTab(id, manual) {
 
 let healBusy = false;
 async function healTick() {
+  autoStopTick().catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   healBusy = true;
   try {
@@ -438,6 +468,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
       case "healNow": return sendResponse(await healTab(msg.id, true));
+      case "stopStream": return sendResponse(await stopStream(msg.id));
       case "markDead": {
         // the user says: this chat's stream is stuck. Flag it dead for 20 min and reload the tab ONCE.
         let res = null;

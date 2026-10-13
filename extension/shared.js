@@ -158,6 +158,18 @@
     return { ok: true, reason: null };
   }
 
+  // Should the extension itself send "Stop" for a chat whose server-side stream looks dead?
+  // t: { status, since, dead, lastStopAt }  (status = last stream_status seen, since = when IS_STREAMING was first seen,
+  // dead = the resume-404 circuit breaker has tripped).  Deliberately conservative: stopping a LIVE long run would destroy it.
+  function shouldAutoStop(t, now, cfg) {
+    const c = Object.assign({ autoStop: false, autoStopMin: 45, stopCooldownMs: 6 * 3600 * 1000 }, cfg || {});
+    if (!c.autoStop) return false;
+    if (!t || t.status !== "IS_STREAMING" || !t.dead) return false;
+    if (now - (t.since || now) < c.autoStopMin * 60000) return false;
+    if (t.lastStopAt && now - t.lastStopAt < c.stopCooldownMs) return false;
+    return true;
+  }
+
   // "0.4.10" > "0.4.2": numeric, component-wise. Anything that is not x.y.z[...] never wins.
   function versionGreater(a, b) {
     const parse = v => (/^\d+(\.\d+){0,3}$/.test(String(v || "")) ? String(v).split(".").map(Number) : null);
@@ -205,6 +217,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
+    shouldAutoStop,
     versionGreater, isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
     canDiscard,
     FAMILIES, FAMILY_IDS, WINDOW_MS, DEFAULT_CEIL, MAX_CEIL, CEIL_MIN, PACE_FRACTION,

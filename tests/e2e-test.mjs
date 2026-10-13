@@ -84,6 +84,14 @@ function limited(kind, max, now, res) {
 const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(crt) }, (req, res) => {
   const now = Date.now();
   const u = new URL(req.url, "https://chatgpt.com");
+  if (u.pathname === "/api/auth/session") { res.setHeader("content-type", "application/json"); return res.end('{"accessToken":"tok"}'); }
+  if (u.pathname === "/backend-api/stop_conversation" && req.method === "POST") {
+    let raw = ""; req.on("data", c => (raw += c));
+    return req.on("end", () => {
+      (lim.stops = lim.stops || []).push({ body: raw, auth: req.headers.authorization || "" });
+      res.setHeader("content-type", "application/json"); res.end('{"status":"ok","last_message_id":null}');
+    });
+  }
   if (u.pathname.startsWith("/c/")) { res.setHeader("content-type", "text/html"); return res.end(PAGE); }
   if (u.pathname === "/__reset") { reset(); return res.end("ok"); }
   if (u.pathname === "/backend-api/conversations/brk1") {
@@ -106,7 +114,7 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
       let off = -1; try { off = JSON.parse(raw).offset; } catch {}
       lim.resumeCalls = (lim.resumeCalls || []).concat(off);
       lim.resumeTotal = (lim.resumeTotal || 0) + 1;
-      if (off !== 0 || /zombie/.test(raw)) { res.statusCode = 404; return res.end(); }
+      if (off !== 0 || /zombie|d00d/.test(raw)) { res.statusCode = 404; return res.end(); }
       res.setHeader("content-type", "text/event-stream");
       res.end('data: {"type":"resume_conversation_token","token":"t"}\n\ndata: {"v":{"message":{"author":{"role":"assistant"}}}}\n\n');
     });
@@ -429,6 +437,34 @@ try {
   for (let i = 0; i < 40 && !settled; i++) { zt3 = await titleOf("6acbd9ff"); settled = zt3 && /^zombie loaded/.test(zt3.t); if (!settled) await sleep(1000); }
   check("after the manual mark the (reloaded) page gets COMPLETE immediately and loads the chat", settled, zt3 && zt3.t);
   await call({ type: "setCfg", patch: { deadAfter: 2 } });
+
+  // 11) manual "Stop" for a stuck stream: the same request the page's own Stop button sends
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { deadAfter: 99 } });
+  await sleep(1500);
+  await resetMock();
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/6acbd9ff-5b94-83ea-b5c9-455b40c38d02?zombie=1', active:true}).then(t=>t.id)");
+  let streaming2 = false, stz = null;
+  for (let i = 0; i < 30 && !streaming2; i++) { stz = await titleOf("38d02"); const sn = await snap(); streaming2 = stz && sn.tabs[stz.id] && sn.tabs[stz.id].streaming >= 0; if (!streaming2) await sleep(500); }
+  check("stop: the dashboard sees the chat as streaming", streaming2);
+  const sres = await call({ type: "stopStream", id: stz.id });
+  check("stop: the bridge sent stop_conversation and the server accepted it", sres && sres.ok === true && sres.result === "ok", sres);
+  const stopCall = (lim.stops || [])[0];
+  check("stop: exactly one request, for THIS conversation, with the user's own bearer token", (lim.stops || []).length === 1 && stopCall && JSON.parse(stopCall.body).conversation_id.endsWith("38d02") && stopCall.auth === "Bearer tok", lim.stops);
+  await call({ type: "setCfg", patch: { deadAfter: 2 } });
+
+  // 12) opt-in auto-stop: IS_STREAMING long enough AND the resume breaker tripped -> one stop, not repeated
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { autoStop: true, autoStopMin: 0.04, deadAfter: 2 } });
+  await sleep(1500);
+  await resetMock();
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/6acbd9ff-5b94-83ea-b5c9-455b40c3d00d?zombie=1', active:true}).then(t=>t.id)");
+  let autoStopped = false;
+  for (let i = 0; i < 70 && !autoStopped; i++) { autoStopped = (lim.stops || []).length >= 1; if (!autoStopped) await sleep(1000); }
+  check("auto-stop (opt-in): a long-dead stream is stopped by the extension itself", autoStopped, lim.stops);
+  await sleep(12000);
+  check("auto-stop is NOT repeated for the same chat", (lim.stops || []).length === 1, { stops: (lim.stops || []).length });
+  await call({ type: "setCfg", patch: { autoStop: false, autoStopMin: 45 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));

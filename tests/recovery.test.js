@@ -300,3 +300,11 @@ test("breaker: a stream that DOES resume is never declared dead", async () => {
   for (let i = 0; i < 3; i++) { const r = await tab.fetch(RESUME, resumeInit(5)); assert.equal(r.status, 200); }
   assert.deepEqual(JSON.parse(await (await tab.fetch(STATUS)).text()), { status: "IS_STREAMING" });
 });
+
+test("a stop-requested stream (IS_STOP_REQUESTED) counts as stream evidence for recovery", async () => {
+  const b = backend({ statusBody: { status: "IS_STOP_REQUESTED" }, resumeHandler: (off, n) => (n === 1 ? new Response("", { status: 404 }) : SSE(GOOD_SSE)) });
+  const tab = makeTab(makeProfile(), b.impl);
+  await tab.fetch(STATUS); await sleep(20);
+  const r = await tab.fetch(RESUME, resumeInit(5));
+  assert.equal(r.status, 200, "recovery is attempted just like for IS_STREAMING");
+});

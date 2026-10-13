@@ -62,6 +62,7 @@ function renderTabs() {
     if (s.draft) chips.push(el("span", { class: "chip draft", text: "✎ черновик", title: "В поле ввода есть неотправленный текст" }));
     if (s.generating) chips.push(el("span", { class: "chip gen", text: "⏵ идёт ответ", title: "Сейчас генерируется ответ" }));
     if (s.recovered) chips.push(el("span", { class: "chip rec", text: `↻ ${s.recovered}`, title: "Сколько раз восстановлен поток после resume-404" }));
+    if (s.stopReq >= 0) chips.push(el("span", { class: "chip hold", text: `⏹ стоп запрошен${s.stopReq ? ` ${s.stopReq} мин` : ""}`, title: "Сервер принял «Стоп», но поток ещё не освободил состояние (IS_STOP_REQUESTED)." }));
     if (s.deadStream) chips.push(el("span", { class: "chip warn", text: "☠ поток завис: игнорирую", title: "Сервер «ведёт» генерацию, но возобновить её не удаётся (resume 404 несколько раз). Расширение отвечает странице, что поток завершён, чтобы она перестала долбить лимит. Снимается само через 20 минут." }));
     else if (s.streaming >= 10) chips.push(el("span", { class: "chip hold", text: `⏵ поток идёт ${s.streaming} мин`, title: "Сервер уже давно сообщает IS_STREAMING для этого чата: возможно, генерация зависла." }));
     if (s.broken) chips.push(el("span", { class: "chip warn", text: `⚠ не загрузилась${s.broken.heals ? ` · лечу ×${s.broken.heals}` : ""}`, title: `История вернула ${s.broken.status}. Расширение само нажмёт «Try again», когда лимит успокоится.` }));
@@ -83,6 +84,13 @@ function renderTabs() {
           await send({ type: "discard", ids: [t.id], force: risky });
           refresh();
         } }),
+      (s.streaming >= 0 || s.stopReq >= 0) ? el("button", { class: "small", text: "⏹ Остановить поток", title: "Отправить stop_conversation: то же, что кнопка «Стоп» в самом чате. Сервер освобождает чат не сразу: на реальном зависшем чате статус около 8–10 минут держался в IS_STOP_REQUESTED, после чего чат ожил. Если там идёт настоящая задача, она будет прервана.",
+        onclick: async () => {
+          if (!confirm("Остановить генерацию в этом чате на сервере?\n\nЕсли там идёт настоящая задача (а не зависший поток), она будет прервана.\n\nЧат освобождается не сразу: статус сначала станет «стоп запрошен» и может держаться несколько минут.")) return;
+          const r = await send({ type: "stopStream", id: t.id });
+          if (!r || !r.ok) alert("Не получилось отправить «Стоп»: " + ((r && (r.reason || r.http)) || "нет ответа"));
+          refresh();
+        } }) : null,
       (!s.deadStream && s.streaming >= 0) ? el("button", { class: "small", text: "Считать зависшим", title: "Сервер говорит, что в этом чате идёт генерация. Если она висит часами: пометить поток мёртвым на 20 минут и один раз перезагрузить вкладку. Страница получит «завершено» и откроет чат как обычно.",
         onclick: async () => { await send({ type: "markDead", id: t.id }); refresh(); } }) : null,
       s.deadStream ? el("button", { class: "small ghost", text: "Снять игнор", title: "Перестать подменять статус потока для этой вкладки",
@@ -135,6 +143,7 @@ async function refresh() {
     if (document.activeElement !== $("gap")) $("gap").value = snap.cfg.restoreGapSec;
     $("chkEnabled").checked = snap.cfg.enabled !== false;
     $("chkHeal").checked = snap.cfg.autoHeal !== false;
+    $("chkAutoStop").checked = snap.cfg.autoStop === true;
   } catch {}
 }
 
@@ -185,6 +194,10 @@ $("btnPanel").onclick = async () => {
   } catch (e) { alert("Не удалось открыть боковую панель: " + (e && e.message || e)); }
 };
 $("btnReset").onclick = async () => { await send({ type: "resetLearned" }); refresh(); };
+$("chkAutoStop").onchange = async e => {
+  if (e.target.checked && !confirm("Включить авто-стоп?\n\nРасширение само отправит «Стоп» чатам, у которых сервер сообщает «идёт генерация» не меньше 45 минут И продолжить поток не удаётся. Если там была настоящая долгая задача, она будет прервана.")) { e.target.checked = false; return; }
+  await send({ type: "setCfg", patch: { autoStop: e.target.checked } });
+};
 $("chkHeal").onchange = async e => { await send({ type: "setCfg", patch: { autoHeal: e.target.checked } }); };
 $("chkEnabled").onchange = async e => { await send({ type: "setCfg", patch: { enabled: e.target.checked } }); };
 $("gap").onchange = async e => { await send({ type: "setCfg", patch: { restoreGapSec: Math.max(3, Number(e.target.value) || 12) } }); };

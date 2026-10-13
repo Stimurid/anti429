@@ -92,6 +92,27 @@
   };
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.type === "a429_stop" && sender.id === chrome.runtime.id) {
+        // The same request the page's own "Stop" button sends. Runs with the user's own session; the access token
+        // stays in this local variable (never stored, logged or sent anywhere else).
+        (async () => {
+          const m = location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
+          if (!m) return sendResponse({ ok: false, reason: "no-conversation-in-url" });
+          try {
+            const sess = await (await fetch("/api/auth/session", { credentials: "include" })).json();
+            if (!sess || !sess.accessToken) return sendResponse({ ok: false, reason: "no-session" });
+            const r = await fetch("/backend-api/stop_conversation", {
+              method: "POST", credentials: "include",
+              headers: { "content-type": "application/json", Authorization: "Bearer " + sess.accessToken },
+              body: JSON.stringify({ conversation_id: m[1] })
+            });
+            let body = null;
+            try { body = await r.json(); } catch {}
+            sendResponse({ ok: r.ok, http: r.status, result: body && body.status || null });
+          } catch (e) { sendResponse({ ok: false, reason: "network" }); }
+        })();
+        return true; // async response
+      }
       if (msg && msg.type === "a429_markdead" && sender.id === chrome.runtime.id) {
         const m = location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
         if (!m) { sendResponse({ ok: false, reason: "no-conversation-in-url" }); return; }
