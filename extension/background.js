@@ -490,11 +490,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // async response
 });
 
+// ---------- self-update for unpacked installs ----------
+// Chrome never re-reads an unpacked extension folder by itself; the user would have to press the reload arrow after
+// every update. Reading our own manifest from disk shows whether a newer build is sitting in the folder.
+async function checkForNewerVersion() {
+  if (cfg.autoReload === false) return;
+  const { lastAutoReload = 0 } = await chrome.storage.local.get("lastAutoReload");
+  if (Date.now() - lastAutoReload < 10 * 60 * 1000) return; // never a reload loop
+  const r = await fetch(chrome.runtime.getURL("manifest.json"), { cache: "no-store" });
+  const disk = (await r.json()).version;
+  if (A.versionGreater(disk, chrome.runtime.getManifest().version)) {
+    await chrome.storage.local.set({ lastAutoReload: Date.now(), reloadedFrom: chrome.runtime.getManifest().version, reloadedTo: disk });
+    chrome.runtime.reload();
+  }
+}
+
 // ---------- housekeeping ----------
 chrome.alarms.create("a429-tick", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(async alarm => {
   await ready;
   if (alarm.name === "a429-tick") {
+    checkForNewerVersion().catch(() => {});
     const now = Date.now();
     let changed = false;
     for (const id of A.FAMILY_IDS) {

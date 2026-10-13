@@ -155,3 +155,15 @@ test("isHealableStatus: transient failures only", () => {
   assert.equal(A.isHealableStatus(404), false);
   assert.equal(A.isHealableStatus(403), false);
 });
+
+test("versionGreater: numeric component-wise comparison, junk never wins", () => {
+  assert.equal(A.versionGreater("0.4.2", "0.4.1"), true);
+  assert.equal(A.versionGreater("0.4.10", "0.4.2"), true);
+  assert.equal(A.versionGreater("1.0", "0.9.9"), true);
+  assert.equal(A.versionGreater("0.4.1", "0.4.1"), false);
+  assert.equal(A.versionGreater("0.4.0", "0.4.1"), false);
+  assert.equal(A.versionGreater("0.4.2", "0.4.2.0"), false);
+  assert.equal(A.versionGreater("", "0.4.1"), false);
+  assert.equal(A.versionGreater(undefined, "0.4.1"), false);
+  assert.equal(A.versionGreater("0.4.x", "0.4.1"), false);
+});

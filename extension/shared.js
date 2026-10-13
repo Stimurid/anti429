@@ -158,6 +158,18 @@
     return { ok: true, reason: null };
   }
 
+  // "0.4.10" > "0.4.2": numeric, component-wise. Anything that is not x.y.z[...] never wins.
+  function versionGreater(a, b) {
+    const parse = v => (/^\d+(\.\d+){0,3}$/.test(String(v || "")) ? String(v).split(".").map(Number) : null);
+    const x = parse(a), y = parse(b);
+    if (!x || !y) return false;
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const d = (x[i] || 0) - (y[i] || 0);
+      if (d !== 0) return d > 0;
+    }
+    return false;
+  }
+
   // ---- auto-heal policy (pure; the worker feeds it live state) ----
   // Is the limiter quiet enough that reviving a dead tab cannot hurt tabs that are working right now?
   // fams: [{id, cd, last429, starts:[ts]}] ; cfg.calmMs = required quiet time since the last 429.
@@ -193,7 +205,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
+    versionGreater, isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
     canDiscard,
     FAMILIES, FAMILY_IDS, WINDOW_MS, DEFAULT_CEIL, MAX_CEIL, CEIL_MIN, PACE_FRACTION,
     RELAX_AFTER_MS, BACKOFFS_MS, HOLD_MAX_MS, TERMINAL_COOLDOWN_MS, RETRY_AFTER_CAP_MS,
