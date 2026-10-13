@@ -4,14 +4,17 @@
 // 2) relays guard events (hold/429/recovered) to the service worker for the popup and badge.
 (() => {
   "use strict";
-  if (window.__A429_BRIDGE__) return;
-  window.__A429_BRIDGE__ = true;
+  if (window.__A429_BRIDGE2__) return;
+  window.__A429_BRIDGE2__ = true;
 
   const NS = "a429:";
   const mirror = items => {
     try {
       if (items.ceilings) localStorage.setItem(NS + "ceil", JSON.stringify(items.ceilings));
-      if (items.cfg) localStorage.setItem(NS + "cfg", JSON.stringify(items.cfg));
+      if (items.cfg) localStorage.setItem(NS + "cfg2", JSON.stringify(items.cfg));
+      // Previous generations of guard.js/recovery.js (already running in this page, impossible to unwrap) read "cfg":
+      // tell them to pass everything straight through; the new guard takes over via "cfg2".
+      localStorage.setItem(NS + "cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg2" }));
     } catch {}
   };
   const pull = () => {
@@ -50,6 +53,32 @@
   document.addEventListener("input", () => reportState(false), true);
   document.addEventListener("visibilitychange", () => reportState(true));
   setTimeout(() => reportState(true), 1500);
+
+  // Auto-heal: click the page's own retry button, but ONLY inside the error block (never the
+  // "Try again" of a model answer, which would regenerate it).
+  const BANNER = /could not load this (chatgpt )?conversation|unable to load (this )?(chatgpt )?conversation|не удалось загрузить/i;
+  const RETRY = /^(try again|retry|повторить|повторите)$/i;
+  const healNow = () => {
+    const root = document.querySelector("main") || document.body;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!BANNER.test(n.nodeValue || "")) continue;
+      for (let el = n.parentElement, depth = 0; el && depth < 5; el = el.parentElement, depth++) {
+        const txt = (el.innerText || "").trim();
+        if (txt.length > 400) break; // too big: this is the page, not the error block
+        const btn = [...el.querySelectorAll('button, [role="button"]')].find(b => RETRY.test((b.textContent || "").trim()));
+        if (btn) { btn.click(); return { clicked: true }; }
+      }
+      return { clicked: false, reason: "no-retry-button" };
+    }
+    return { clicked: false, reason: "no-banner" };
+  };
+  try {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg || msg.type !== "a429_heal" || sender.id !== chrome.runtime.id) return;
+      try { sendResponse(healNow()); } catch (e) { sendResponse({ clicked: false, reason: "error" }); }
+    });
+  } catch {}
 
   window.addEventListener("__a429_event__", event => {
     try {

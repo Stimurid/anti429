@@ -140,7 +140,7 @@ try {
   async function scenario(enabled) {
     await fetch(`http://127.0.0.1:${PORT}/reset`);
     for (const c of tabs) {
-      await evalIn(c, `localStorage.clear();localStorage.setItem('a429:cfg',JSON.stringify({enabled:${enabled},windowMs:${WINDOW},holdMaxMs:120000}));localStorage.setItem('a429:ceil',JSON.stringify({detail:${MAX}}));`);
+      await evalIn(c, `localStorage.clear();localStorage.setItem('a429:cfg2',JSON.stringify({enabled:${enabled},windowMs:${WINDOW},holdMaxMs:120000}));localStorage.setItem('a429:ceil',JSON.stringify({detail:${MAX}}));`);
       await evalIn(c, sharedSrc + "\n" + guardSrc + "\ntrue");
     }
     const t0 = Date.now();

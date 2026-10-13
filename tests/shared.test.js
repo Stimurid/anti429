@@ -118,3 +118,40 @@ test("burstCount: counts the cluster of accepted requests ending now, ignoring o
   assert.equal(A.burstCount([100, 3000, 3010, 3020], 3030), 3, "an older lone request does not inflate the burst");
   assert.equal(A.burstCount([100, 110], 5000), 0, "nothing recent -> no evidence");
 });
+
+test("isCalm: quiet only when no cooldown, no recent 429 and nobody is loading history", () => {
+  const now = 100000;
+  const quiet = [{ id: "detail", cd: 0, last429: 0, starts: [] }, { id: "stream", cd: 0, last429: 0, starts: [now - 500] }];
+  assert.equal(A.isCalm(quiet, now, { calmMs: 30000 }), true);
+  assert.equal(A.isCalm([{ id: "detail", cd: now + 5000, last429: 0, starts: [] }], now), false, "cooldown active");
+  assert.equal(A.isCalm([{ id: "list", cd: 0, last429: now - 10000, starts: [] }], now, { calmMs: 30000 }), false, "429 10 s ago");
+  assert.equal(A.isCalm([{ id: "list", cd: 0, last429: now - 40000, starts: [] }], now, { calmMs: 30000 }), true, "429 40 s ago is old enough");
+  assert.equal(A.isCalm([{ id: "detail", cd: 0, last429: 0, starts: [now - 1000, now - 2000] }], now), false, "history is being loaded right now");
+});
+
+test("pickHealTarget: one tab at a time, active first, spaced, bounded", () => {
+  const now = 1000000;
+  const tabs = [
+    { id: 1, active: false, failedAt: now - 60000, heals: 0, lastHealAt: 0 },
+    { id: 2, active: true, failedAt: now - 20000, heals: 0, lastHealAt: 0 },
+    { id: 3, active: false, failedAt: now - 90000, heals: 0, lastHealAt: 0 }
+  ];
+  const ctx = { calm: true, now, lastHealAny: 0 };
+  assert.equal(A.pickHealTarget(tabs, ctx), 2, "the tab you are looking at first");
+  assert.equal(A.pickHealTarget(tabs, Object.assign({}, ctx, { calm: false })), null, "never when not calm");
+  assert.equal(A.pickHealTarget(tabs, Object.assign({}, ctx, { lastHealAny: now - 5000 })), null, "global spacing between heals");
+  const without2 = tabs.filter(t => t.id !== 2);
+  assert.equal(A.pickHealTarget(without2, ctx), 3, "then the oldest failure");
+  assert.equal(A.pickHealTarget([{ id: 9, active: true, failedAt: now - 1000, heals: 0 }], ctx), null, "a fresh failure settles first");
+  assert.equal(A.pickHealTarget([{ id: 9, active: true, failedAt: now - 60000, heals: 1, lastHealAt: now - 10000 }], ctx), null, "per-tab backoff after a heal");
+  assert.equal(A.pickHealTarget([{ id: 9, active: true, failedAt: now - 600000, heals: 1, lastHealAt: now - 40000 }], ctx), 9, "...and allowed again after the backoff");
+  assert.equal(A.pickHealTarget([{ id: 9, active: true, failedAt: now - 600000, heals: 4, lastHealAt: 0 }], ctx), null, "gives up after maxHeals");
+});
+
+test("isHealableStatus: transient failures only", () => {
+  assert.equal(A.isHealableStatus(429), true);
+  assert.equal(A.isHealableStatus(503), true);
+  assert.equal(A.isHealableStatus(0), true);
+  assert.equal(A.isHealableStatus(404), false);
+  assert.equal(A.isHealableStatus(403), false);
+});

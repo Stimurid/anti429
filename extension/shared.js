@@ -158,7 +158,42 @@
     return { ok: true, reason: null };
   }
 
+  // ---- auto-heal policy (pure; the worker feeds it live state) ----
+  // Is the limiter quiet enough that reviving a dead tab cannot hurt tabs that are working right now?
+  // fams: [{id, cd, last429, starts:[ts]}] ; cfg.calmMs = required quiet time since the last 429.
+  function isCalm(fams, now, cfg) {
+    const c = Object.assign({ calmMs: 30000 }, cfg || {});
+    for (const f of fams) {
+      if (f.cd > now) return false;
+      if (f.last429 && now - f.last429 < c.calmMs) return false;
+    }
+    const hist = fams.filter(f => f.id === "detail" || f.id === "legacy")
+      .reduce((n, f) => n + countIn(f.starts || [], now, WINDOW_MS), 0);
+    return hist <= 1; // somebody is loading history right now -> not calm
+  }
+
+  const HEAL_BACKOFF_MS = [0, 30000, 90000, 240000];
+  // tabs: [{id, active, failedAt, heals, lastHealAt}] -> id of the ONE tab to revive now, or null.
+  function pickHealTarget(tabs, ctx) {
+    const c = Object.assign({ calm: false, now: Date.now(), lastHealAny: 0, minGapMs: 15000, maxHeals: 4, settleMs: 3000 }, ctx || {});
+    if (!c.calm) return null;
+    if (c.now - c.lastHealAny < c.minGapMs) return null;
+    const ok = (tabs || []).filter(t => {
+      const heals = t.heals || 0;
+      if (heals >= c.maxHeals) return false;
+      if (c.now - (t.failedAt || 0) < c.settleMs) return false;
+      const gap = HEAL_BACKOFF_MS[Math.min(heals, HEAL_BACKOFF_MS.length - 1)] * (c.backoffScale == null ? 1 : c.backoffScale);
+      return c.now - (t.lastHealAt || 0) >= gap;
+    });
+    ok.sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0) || (a.failedAt || 0) - (b.failedAt || 0));
+    return ok.length ? ok[0].id : null;
+  }
+
+  // Only transient failures are worth retrying (not 404 = deleted conversation, not 403 = no access).
+  function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
+
   return {
+    isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
     canDiscard,
     FAMILIES, FAMILY_IDS, WINDOW_MS, DEFAULT_CEIL, MAX_CEIL, CEIL_MIN, PACE_FRACTION,
     RELAX_AFTER_MS, BACKOFFS_MS, HOLD_MAX_MS, TERMINAL_COOLDOWN_MS, RETRY_AFTER_CAP_MS,

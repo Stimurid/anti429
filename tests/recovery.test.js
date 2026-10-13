@@ -17,7 +17,7 @@ class FakeWS {
 
 function makeProfile(cfg) {
   const store = new Map();
-  store.set("a429:cfg", JSON.stringify(Object.assign({ enabled: true, recovery: true, timeScale: 0.05 }, cfg || {})));
+  store.set("a429:cfg2", JSON.stringify(Object.assign({ enabled: true, recovery: true, timeScale: 0.05 }, cfg || {})));
   const held = new Set();
   const locks = {
     async request(name, opts, fn) {

@@ -28,7 +28,7 @@ if (!fs.existsSync(crt)) {
 // ---------- mock chatgpt.com ----------
 const PAGE = `<!doctype html><title>chat</title><body>mock<script>
 const id=location.pathname.split('/').pop(), q=new URLSearchParams(location.search);
-fetch('/backend-api/conversations/'+id).then(r=>{document.title='status '+r.status}).catch(()=>{});
+if(!q.get('broken')) fetch('/backend-api/conversations/'+id).then(r=>{document.title='status '+r.status}).catch(()=>{});
 if(q.get('poll')) setInterval(()=>{fetch('/backend-api/conversation/'+id+'/stream_status').catch(()=>{});fetch('/backend-api/conversations/'+id).catch(()=>{})},1500);
 if(q.get('draft')) document.body.insertAdjacentHTML('beforeend','<div id="prompt-textarea" contenteditable="true">unsent draft text</div>');
 if(q.get('resume')) (async()=>{
@@ -36,10 +36,22 @@ if(q.get('resume')) (async()=>{
   const r=await fetch('/backend-api/f/conversation/resume',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversation_id:id,offset:5})});
   document.title='resume '+r.status+' '+(r.headers.get('content-type')||'');
 })();
+if(q.get('broken')) {
+  document.body.insertAdjacentHTML('beforeend','<main><section id="ans">Assistant answer text <button id="decoy">Try again</button></section></main>');
+  document.getElementById('decoy').onclick=()=>{document.title='DECOY CLICKED'};
+  const load=async()=>{
+    const r=await fetch('/backend-api/conversations/'+id);
+    if(r.ok){ const e=document.getElementById('e'); if(e) e.remove(); document.title='healed '+r.status; }
+    else { document.title='broken '+r.status;
+      if(!document.getElementById('e')) document.querySelector('main').insertAdjacentHTML('afterbegin','<div id="e">Could not load this ChatGPT conversation <button id="retry">Try again</button></div>');
+      document.getElementById('retry').onclick=load; }
+  };
+  load();
+}
 if(q.get('burst')) Promise.all(Array.from({length:10},(_,i)=>fetch('/backend-api/conversations/b'+i).then(r=>r.status))).then(s=>{document.title='burst '+s.join(',')});
 </script>`;
 let lim;
-const reset = () => (lim = { detail: { starts: [], pen: 0, rej: [] }, stream: { starts: [], pen: 0, rej: [] }, stats: { ok: 0, r429: 0 } });
+const reset = () => (lim = { brk: 0,  detail: { starts: [], pen: 0, rej: [] }, stream: { starts: [], pen: 0, rej: [] }, stats: { ok: 0, r429: 0 } });
 reset();
 function limited(kind, max, now, res) {
   const L = lim[kind];
@@ -60,6 +72,11 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
   const u = new URL(req.url, "https://chatgpt.com");
   if (u.pathname.startsWith("/c/")) { res.setHeader("content-type", "text/html"); return res.end(PAGE); }
   if (u.pathname === "/__reset") { reset(); return res.end("ok"); }
+  if (u.pathname === "/backend-api/conversations/brk1") {
+    lim.brk++;
+    if (lim.brk <= 3) { res.statusCode = 429; res.setHeader("retry-after", "1"); return res.end('{"detail":"Too many requests"}'); }
+    res.setHeader("content-type", "application/json"); return res.end('{"ok":true}');
+  }
   if (/^\/backend-api\/conversations\/[^/]+$/.test(u.pathname)) {
     if (limited("detail", MAX_DETAIL, now, res)) return;
     return setTimeout(() => { res.setHeader("content-type", "application/json"); res.setHeader("content-length", "20"); res.end('{"ok":true,"pad":"xx"}'); }, 30);
@@ -108,7 +125,7 @@ const resetMock = () => new Promise(res => {
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), "a429-e2e-"));
 const chrome = spawn(CHROME, [
   `--user-data-dir=${profile}`, `--remote-debugging-port=${DEBUG}`, "--remote-allow-origins=*",
-  "--enable-unsafe-extension-debugging", "--disable-features=DisableLoadExtensionCommandLineSwitch",
+  "--enable-unsafe-extension-debugging", "--disable-features=DisableLoadExtensionCommandLineSwitch,CalculateNativeWinOcclusion", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
   `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${MOCK}`, "--ignore-certificate-errors", "--test-type",
   "--no-first-run", "--no-default-browser-check", "about:blank"
 ], { stdio: "ignore" });
@@ -286,6 +303,78 @@ try {
   check("dock LEFT: same single window moved to the left edge", leftWins.length === 1 && Math.abs(leftWins[0].left - scr.left) <= 20, { popups: leftWins, scrLeft: scr.left });
   const sp = await ev(pop, "chrome.sidePanel.getOptions({}).then(o=>JSON.stringify(o))");
   check("side panel is registered with the panel-mode page", /mode=panel/.test(sp), sp);
+
+  // 7) the herd: 8 tabs open at once, only the last one is visible (this is what a session restore looks like)
+  // the docked dashboard windows from step 6 would cover the browser window (Chrome then reports its tabs as hidden)
+  await ev(pop, "chrome.windows.getAll({windowTypes:['popup']}).then(ws=>Promise.all(ws.map(w=>chrome.windows.remove(w.id))))");
+  await ev(pop, "chrome.windows.getAll({windowTypes:['normal']}).then(ws=>chrome.windows.update(ws[0].id,{focused:true,state:'normal'}))");
+  await sleep(1000);
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "resetLearned" });
+  await sleep(11000); // let the mock's penalty window and the tabs' shared cooldown run out
+  await resetMock();
+  const titleOf = async frag => (await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>ts.map(t=>({u:t.url||'',t:t.title||'',id:t.id,disc:t.discarded})))")).find(x => (x.u || '').includes(frag));
+  const herdTabs = [];
+  // like a session restore: every tab except the last is created in the BACKGROUND (never visible)
+  for (let i = 0; i < 8; i++) herdTabs.push(await ev(pop, `chrome.tabs.create({url:'https://chatgpt.com/c/herd${i}', active:${i === 7}}).then(t=>t.id)`));
+  await sleep(2500);
+  let fgOk = false;
+  for (let i = 0; i < 30 && !fgOk; i++) { const t = await titleOf("herd7"); fgOk = t && /^status 200/.test(t.t); if (!fgOk) await sleep(1000); }
+  check("the VISIBLE tab loaded its history promptly", fgOk);
+  let loadedHidden = 0;
+  for (let i = 0; i < 7; i++) { const t = await titleOf(`herd${i}`); if (t && /^status/.test(t.t)) loadedHidden++; }
+  check("hidden tabs did NOT hit the server while invisible (deferred)", loadedHidden === 0, { loadedHidden });
+  check("no 429s from the herd while only the visible tab worked", lim.stats.r429 <= 1, lim.stats);
+  const idsHidden = [];
+  for (let i = 0; i < 7; i++) idsHidden.push((await titleOf(`herd${i}`)).id);
+  // a tab you switch away from before its turn comes goes back to "hidden" and waits again (by design),
+  // so visit them one at a time and let each finish while it is visible
+  let allOk = true;
+  for (let k = 0; k < 7; k++) {
+    await ev(pop, `chrome.tabs.update(${idsHidden[k]},{active:true})`);
+    await sleep(700);
+    const visNow = await ev(pop, `chrome.scripting.executeScript({target:{tabId:${idsHidden[k]}},world:'MAIN',func:()=>document.visibilityState}).then(r=>r[0].result)`).catch(() => "err");
+    if (k === 0) check("an activated tab really reports visibilityState=visible (test environment sanity)", visNow === "visible", visNow);
+    let ok = false;
+    for (let i = 0; i < 25 && !ok; i++) { const t = await titleOf(`herd${k}`); ok = t && /^status 200/.test(t.t); if (!ok) await sleep(1000); }
+    if (!ok) allOk = false;
+  }
+  let dbgRows = null;
+  if (!allOk) {
+    dbgRows = [];
+    for (let k = 0; k < 7; k++) {
+      const tt = await titleOf(`herd${k}`);
+      let info = null;
+      try { info = await ev(pop, `chrome.scripting.executeScript({target:{tabId:${tt.id}},world:'MAIN',func:()=>({vis:document.visibilityState,st:window.__A429_STATE__&&window.__A429_STATE__(),ls:Object.fromEntries(Object.keys(localStorage).filter(k=>k.startsWith('a429:')&&!/cfg|ceil/.test(k)).map(k=>[k,localStorage.getItem(k)]))})}).then(r=>JSON.stringify(r[0].result))`); } catch (e) { info = String(e).slice(0, 80); }
+      dbgRows.push({ k, title: tt && tt.t, info });
+    }
+  }
+  check("visiting the hidden tabs one by one, every tab loads while it is visible", allOk, dbgRows);
+  check("the whole herd cost at most a few 429s in total", lim.stats.r429 <= 4, lim.stats);
+
+  // 8) auto-heal: a visible tab whose history terminally failed (banner) is revived once the limiter is calm
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 3000, healGapMs: 2000, healBackoffScale: 0.05, autoHeal: true } });
+  await call({ type: "resetLearned" });
+  await ev(pop, "chrome.storage.local.set({ceilings:{detail:12,legacy:12,stream:12,list:12}})");
+  await sleep(4000);
+  await resetMock();
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/brk1?broken=1', active:true}).then(t=>t.id)");
+  let sawBroken = false, brokenFlagged = false;
+  for (let i = 0; i < 25 && !sawBroken; i++) { const t = await titleOf("brk1"); sawBroken = t && /^broken 429/.test(t.t); if (!sawBroken) await sleep(500); }
+  check("the page was finally shown the 429 (banner) after the hold budget", sawBroken);
+  await sleep(1200);
+  const sb = await snap();
+  const brkTab = await titleOf("brk1");
+  brokenFlagged = brkTab && sb.tabs[brkTab.id] && sb.tabs[brkTab.id].broken && sb.tabs[brkTab.id].broken.status === 429;
+  check("the extension knows that tab is broken (status 429)", brokenFlagged, brkTab && sb.tabs[brkTab.id] && sb.tabs[brkTab.id].broken);
+  let healed = false;
+  for (let i = 0; i < 70 && !healed; i++) { const t = await titleOf("brk1"); healed = t && /^healed 200/.test(t.t); if (!healed) await sleep(500); }
+  check("the tab was revived automatically (its own 'Try again' clicked) once calm", healed);
+  const fin = await titleOf("brk1");
+  check("the decoy 'Try again' inside the answer was NOT clicked", fin && !/DECOY/.test(fin.t), fin && fin.t);
+  check("exactly one heal was needed: 3 failed attempts + 1 success on the mock", lim.brk === 4, { brkCalls: lim.brk });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));

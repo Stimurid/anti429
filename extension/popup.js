@@ -62,6 +62,7 @@ function renderTabs() {
     if (s.draft) chips.push(el("span", { class: "chip draft", text: "✎ черновик", title: "В поле ввода есть неотправленный текст" }));
     if (s.generating) chips.push(el("span", { class: "chip gen", text: "⏵ идёт ответ", title: "Сейчас генерируется ответ" }));
     if (s.recovered) chips.push(el("span", { class: "chip rec", text: `↻ ${s.recovered}`, title: "Сколько раз восстановлен поток после resume-404" }));
+    if (s.broken) chips.push(el("span", { class: "chip warn", text: `⚠ не загрузилась${s.broken.heals ? ` · лечу ×${s.broken.heals}` : ""}`, title: `История вернула ${s.broken.status}. Расширение само нажмёт «Try again», когда лимит успокоится.` }));
     if (!t.discarded && !s.guard) chips.push(el("span", { class: "chip noguard", text: "без защиты", title: "Защита не подключена к этой вкладке — нажмите «Защитить открытые вкладки»" }));
     const m = el("div", { class: "m" },
       el("span", { text: `${s.req60} запр/мин` }),
@@ -80,6 +81,8 @@ function renderTabs() {
           await send({ type: "discard", ids: [t.id], force: risky });
           refresh();
         } }),
+      s.broken ? el("button", { class: "small", text: "Повторить", title: "Нажать «Try again» на этой вкладке сейчас",
+        onclick: async () => { await send({ type: "healNow", id: t.id }); refresh(); } }) : null,
       el("button", { class: "small ghost", text: "✕", title: "Закрыть вкладку",
         onclick: async () => { await send({ type: "close", id: t.id }); refresh(); } }));
     box.append(el("div", { class: "tab" + (s.loop ? " loop" : "") + (t.discarded ? " disc" : "") },
@@ -125,6 +128,7 @@ async function refresh() {
     $("btnProtect").textContent = `Защитить открытые вкладки (${unprotected})`;
     if (document.activeElement !== $("gap")) $("gap").value = snap.cfg.restoreGapSec;
     $("chkEnabled").checked = snap.cfg.enabled !== false;
+    $("chkHeal").checked = snap.cfg.autoHeal !== false;
   } catch {}
 }
 
@@ -175,6 +179,7 @@ $("btnPanel").onclick = async () => {
   } catch (e) { alert("Не удалось открыть боковую панель: " + (e && e.message || e)); }
 };
 $("btnReset").onclick = async () => { await send({ type: "resetLearned" }); refresh(); };
+$("chkHeal").onchange = async e => { await send({ type: "setCfg", patch: { autoHeal: e.target.checked } }); };
 $("chkEnabled").onchange = async e => { await send({ type: "setCfg", patch: { enabled: e.target.checked } }); };
 $("gap").onchange = async e => { await send({ type: "setCfg", patch: { restoreGapSec: Math.max(3, Number(e.target.value) || 12) } }); };
 

@@ -10,10 +10,11 @@
 // It never touches POST/stream bodies and never bypasses the limiter — it only spaces requests out.
 (() => {
   "use strict";
-  if (window.__A429_GUARD__) return;
+  if (window.__A429_GUARD2__) return; // v0.4+ flag; older generations used __A429_GUARD__
   const A = window.A429;
   if (!A) return; // shared.js did not load
-  window.__A429_GUARD__ = true;
+  window.__A429_GUARD2__ = true;
+  window.__A429_GUARD__ = true; // keeps old probes truthful
 
   const NS = "a429:";
   const nativeFetch = window.fetch.bind(window);
@@ -27,7 +28,7 @@
 
   // cfg is mirrored from chrome.storage by bridge.js; tests set it directly.
   const cfg = () => Object.assign(
-    { enabled: true, timeScale: 1, windowMs: A.WINDOW_MS, holdMaxMs: A.HOLD_MAX_MS }, readJSON("cfg", {}));
+    { enabled: true, timeScale: 1, windowMs: A.WINDOW_MS, holdMaxMs: A.HOLD_MAX_MS }, readJSON("cfg2", {}));
   const off = () => cfg().enabled === false;
   const ceilOf = fam => {
     const c = readJSON("ceil", {});
@@ -35,7 +36,7 @@
     return Number.isFinite(v) && v >= A.CEIL_MIN ? v : A.DEFAULT_CEIL[fam];
   };
 
-  const stats = { holds: 0, r429: 0, recovered: 0, terminal: 0 };
+  const stats = { holds: 0, r429: 0, recovered: 0, terminal: 0, deferred: 0 };
   const STAT_OF = { "hold-start": "holds", "429": "r429", "recovered": "recovered", "terminal": "terminal" };
   const emit = (type, data) => {
     if (STAT_OF[type]) stats[STAT_OF[type]]++;
@@ -73,19 +74,56 @@
     ls.set("cd:" + fam, String(Math.max(cur, until)));
   };
 
+  // ---------- v0.4: priority, single probe, honest Retry-After ----------
+  // Which tab is this? (random per page load; used for the probe lease)
+  const tabKey = Math.random().toString(36).slice(2, 10);
+  const hidden = () => typeof document !== "undefined" && document.visibilityState === "hidden";
+  // History loads of tabs the user cannot see are deferred until the tab is shown: they would only compete with
+  // the tab being looked at. (stream/list keep running, just with lower priority.)
+  const DEFER = new Set(["detail", "legacy"]);
+
+  const waitVisible = signal => new Promise((resolve, reject) => {
+    if (!hidden()) return resolve();
+    if (signal && signal.aborted) return reject(abortError(signal));
+    const done = () => { document.removeEventListener("visibilitychange", onVis); if (signal) signal.removeEventListener("abort", onAbort); };
+    const onVis = () => { if (!hidden()) { done(); resolve(); } };
+    const onAbort = () => { done(); reject(abortError(signal)); };
+    document.addEventListener("visibilitychange", onVis);
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  });
+
   // Wait until this request may start. Returns when a slot has been reserved in the shared ledger.
   async function admit(fam, signal, onWait) {
     for (;;) {
+      const c = cfg();
+      if (c.deferHidden !== false && DEFER.has(fam) && hidden()) {
+        onWait();
+        stats.deferred++;
+        await waitVisible(signal);
+        continue;
+      }
+      const fg = !hidden();
       const wait = await withLock(fam, signal, () => {
         const now = Date.now();
-        const c = cfg();
+        if (fg) ls.set("fg:" + fam, String(now));
         const cd = Number(ls.get("cd:" + fam)) || 0;
         if (cd > now) return cd - now;
+        // After a 429 episode only ONE request (the probe) goes out; everybody else waits for its verdict.
+        // This stops N tabs from waking up together and re-arming the server's penalty.
+        const inEpisode = (Number(ls.get("fl:" + fam)) || 0) > 0;
+        if (inEpisode) {
+          const lease = readJSON("probe:" + fam, null);
+          if (lease && lease.until > now && lease.owner !== tabKey) return Math.min(lease.until - now, 1200);
+          // a background tab yields to a foreground one that is waiting right now
+          const fgSeen = Number(ls.get("fg:" + fam)) || 0;
+          if (!fg && now - fgSeen < 3000) return 1000;
+        }
         const led = readJSON("led:" + fam, []).filter(t => now - t < c.windowMs * 2);
         const w = A.paceWaitMs(led, now, c.windowMs, A.capFor(ceilOf(fam)));
         if (w > 0) { ls.set("led:" + fam, JSON.stringify(led)); return w; }
         led.push(now);
         ls.set("led:" + fam, JSON.stringify(led));
+        if (inEpisode) ls.set("probe:" + fam, JSON.stringify({ owner: tabKey, until: now + 20000 }));
         return 0;
       });
       if (wait <= 0) return;
@@ -102,23 +140,38 @@
     try {
       for (let attempt = 0; ; attempt++) {
         await admit(fam, signal, onWait);
-        const resp = await nativeFetch(input, init);
+        let resp;
+        try { resp = await nativeFetch(input, init); }
+        catch (e) { ls.del("probe:" + fam); throw e; }
         const c = cfg();
         if (resp.status !== 429) {
           ls.del("fl:" + fam);
           ls.del("cd:" + fam);
+          ls.del("probe:" + fam);
           if (attempt > 0) emit("recovered", { fam, attempt, heldMs: Date.now() - t0 });
           return resp;
         }
         // ---- 429 ----
-        const ra = A.parseRetryAfter(resp.headers && resp.headers.get && resp.headers.get("retry-after"), Date.now());
-        const level = Number(ls.get("fl:" + fam)) || 0;
-        ls.set("fl:" + fam, String(level + 1));
-        const wait = A.jitter(Math.max(ra, A.retryBackoffMs(level) * c.timeScale), 0.1);
-        setCdMax(fam, Date.now() + wait);
+        const now = Date.now();
+        const ra = A.parseRetryAfter(resp.headers && resp.headers.get && resp.headers.get("retry-after"), now);
+        // One escalation step per EPISODE (not per reply): with many tabs each 429 used to bump the shared level.
+        let level = Number(ls.get("fl:" + fam)) || 0;
+        const lastInc = Number(ls.get("flts:" + fam)) || 0;
+        if (now - lastInc > 4000 * c.timeScale || level === 0) {
+          level++;
+          ls.set("fl:" + fam, String(level));
+          ls.set("flts:" + fam, String(now));
+        }
+        // The server's Retry-After is authoritative; our own exponential backoff is only the fallback when it is absent.
+        const base = ra > 0 ? ra * 1.05 : A.retryBackoffMs(level - 1) * c.timeScale;
+        const wait = A.jitter(base, 0.1) + Math.floor(Math.random() * 600 * c.timeScale);
+        setCdMax(fam, now + wait);
+        ls.del("probe:" + fam); // the probe failed: release the lease so the next probe happens after the cooldown
         emit("429", { fam, attempt, waitMs: wait, retryAfterMs: ra });
-        if (Date.now() - t0 + wait > c.holdMaxMs) {
-          setCdMax(fam, Date.now() + A.TERMINAL_COOLDOWN_MS * c.timeScale);
+        // foreground tabs are worth waiting for twice as long
+        const budget = c.holdMaxMs * (hidden() ? 1 : 2);
+        if (now - t0 + wait > budget) {
+          setCdMax(fam, now + A.TERMINAL_COOLDOWN_MS * c.timeScale);
           emit("terminal", { fam });
           return resp; // let the page see the 429 after the hold budget is spent
         }
@@ -148,7 +201,13 @@
       if (!info) return nativeFetch(input, init);
       const fam = A.classify(info.method, info.url.pathname);
       if (!fam || !A.isGuardable(info.method, fam)) return nativeFetch(input, init);
-      return guarded(input, init, fam, signalOf(input, init));
+      const p = guarded(input, init, fam, signalOf(input, init));
+      if (fam !== "detail" && fam !== "legacy") return p;
+      // Tell the extension whether the PAGE got a usable history reply (drives the auto-heal of dead tabs).
+      return p.then(r => {
+        emit(r && r.ok ? "history-ok" : "history-failed", { fam, status: r ? r.status : 0 });
+        return r;
+      }, e => { if (!(e && e.name === "AbortError")) emit("history-failed", { fam, status: 0 }); throw e; });
     } catch {
       return nativeFetch(input, init);
     }
@@ -167,5 +226,5 @@
     return out;
   };
 
-  emit("installed", { version: "0.1.0" });
+  emit("installed", { version: "0.4.0" });
 })();

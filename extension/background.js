@@ -9,7 +9,11 @@ const DEFAULT_CFG = {
   loopDetail: 4,          // history GETs / 60 s that make a tab look like a poll loop
   loopStream: 5,          // stream_status/resume / 60 s
   loopMb10: 100,          // MB transferred in 10 min
-  restoreGapSec: 12       // pause between tabs when restoring a saved session
+  restoreGapSec: 12,      // pause between tabs when restoring a saved session
+  autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
+  calmMs: 30000,          // required quiet time since the last 429 before a heal
+  healGapMs: 15000,       // at least this long between two heals (any tabs)
+  healBackoffScale: 1     // multiplies the per-tab retry spacing (test hook)
 };
 
 const URLS = ["https://chatgpt.com/backend-api/*"];
@@ -26,6 +30,8 @@ const H = {};   // tabId -> held requests (from guard events)
 const P = {};   // tabId -> { draft, generating } reported by bridge.js
 const G = {};   // tabId -> true once guard.js announced itself in that tab
 const R = {};   // tabId -> number of successful resume recoveries
+const B = {};   // tabId -> { failedAt, status, heals, lastHealAt }  pages that were shown a failed history load
+let lastHealAny = 0;
 let dirty = false;
 
 const tabStats = id => (T[id] || (T[id] = { req: [], fam: {}, bytes: [], c429: [] }));
@@ -46,6 +52,7 @@ const ready = (async () => {
     Object.assign(P, s.P || {});
     Object.assign(G, s.G || {});
     Object.assign(R, s.R || {});
+    Object.assign(B, s.B || {});
   }
   // v0.2.1: earlier builds could learn a ceiling of 2 from a limiter that was already hot. Forget those once.
   if (!local.schema || local.schema < 3) {
@@ -62,7 +69,7 @@ function persistSoon() {
   dirty = true;
   setTimeout(async () => {
     dirty = false;
-    try { await chrome.storage.session.set({ state: { F, T, H, P, G, R } }); } catch {}
+    try { await chrome.storage.session.set({ state: { F, T, H, P, G, R, B } }); } catch {}
   }, 2500);
 }
 
@@ -157,8 +164,8 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   scheduleRender();
 }, { urls: URLS }, ["responseHeaders"]);
 
-chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; persistSoon(); });
-chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; } });
+chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; persistSoon(); });
+chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; delete B[id]; } });
 
 // ---------- snapshot / render ----------
 function famRow(id, now) {
@@ -192,13 +199,14 @@ function snapshot() {
     tabs[id] = stats;
   }
   for (const [id, n] of Object.entries(H)) if (n && !tabs[id]) tabs[id] = { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: n, loop: false };
-  const ids = new Set([...Object.keys(tabs), ...Object.keys(P), ...Object.keys(G), ...Object.keys(R)]);
+  const ids = new Set([...Object.keys(tabs), ...Object.keys(P), ...Object.keys(G), ...Object.keys(R), ...Object.keys(B)]);
   for (const id of ids) {
     const t = tabs[id] || (tabs[id] = { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: 0, loop: false });
     t.draft = !!(P[id] && P[id].draft);
     t.generating = !!(P[id] && P[id].generating);
     t.guard = !!G[id];
     t.recovered = R[id] || 0;
+    t.broken = B[id] ? { status: B[id].status, heals: B[id].heals || 0, agoSec: Math.round((now - B[id].failedAt) / 1000) } : null;
   }
   return { now, fams, overall: A.worstLevel(fams.map(r => r.level)), tabs, cfg, families: A.FAMILIES };
 }
@@ -279,6 +287,44 @@ async function discardTabs(ids, force) {
   return { discarded: done, skipped };
 }
 
+// ---------- auto-heal of dead tabs ----------
+function calmNow(now) {
+  return A.isCalm(A.FAMILY_IDS.map(id => ({ id, cd: F[id].cd, last429: F[id].last429, starts: F[id].starts })), now, cfg);
+}
+
+async function healTab(id, manual) {
+  const b = B[id] || (B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() });
+  b.heals = (b.heals || 0) + 1;
+  b.lastHealAt = Date.now();
+  if (!manual) lastHealAny = Date.now();
+  let res = null;
+  try { res = await chrome.tabs.sendMessage(id, { type: "a429_heal" }); } catch {}
+  if (res && !res.clicked && res.reason === "no-banner") delete B[id]; // the page already recovered by itself
+  persistSoon();
+  return res || { clicked: false, reason: "no-bridge" };
+}
+
+let healBusy = false;
+async function healTick() {
+  if (healBusy || cfg.autoHeal === false) return;
+  healBusy = true;
+  try {
+    const now = Date.now();
+    const cands = [];
+    for (const [sid, b] of Object.entries(B)) {
+      const id = Number(sid);
+      let tab = null;
+      try { tab = await chrome.tabs.get(id); } catch {}
+      if (!tab || tab.discarded) { delete B[sid]; continue; }
+      cands.push({ id, active: !!tab.active, failedAt: b.failedAt, heals: b.heals || 0, lastHealAt: b.lastHealAt || 0 });
+    }
+    if (!cands.length) return;
+    const pick = A.pickHealTarget(cands, { calm: calmNow(now), now, lastHealAny, minGapMs: cfg.healGapMs, backoffScale: cfg.healBackoffScale });
+    if (pick != null) await healTab(pick, false);
+  } finally { healBusy = false; }
+}
+setInterval(() => { healTick().catch(() => {}); }, 5000);
+
 // Inject bridge + guard into chatgpt tabs that were open before the extension was installed/updated,
 // so nobody has to F5 twenty tabs at once (that reload burst is exactly the stampede we want to avoid).
 // Ask each tab's page directly whether guard.js is alive there. The 'installed' event alone is not enough:
@@ -291,7 +337,7 @@ async function probeGuards(force) {
   for (const t of await chatTabs()) {
     if (t.discarded) { delete G[t.id]; continue; }
     try {
-      const [r] = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: "MAIN", func: () => !!window.__A429_GUARD__ });
+      const [r] = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: "MAIN", func: () => !!window.__A429_GUARD2__ });
       if (r && r.result) G[t.id] = true; else delete G[t.id];
     } catch {}
   }
@@ -363,6 +409,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           else if (msg.ev.type === "hold-end") H[id] = Math.max(0, (H[id] || 0) - 1);
           else if (msg.ev.type === "installed") G[id] = true;
           else if (msg.ev.type === "resume-recovery-success") R[id] = (R[id] || 0) + 1;
+          else if (msg.ev.type === "history-failed") {
+            if (A.isHealableStatus(msg.ev.status)) B[id] = Object.assign({ heals: 0, lastHealAt: 0 }, B[id], { failedAt: Date.now(), status: msg.ev.status });
+          } else if (msg.ev.type === "history-ok") delete B[id];
           persistSoon(); scheduleRender();
         }
         return sendResponse({ ok: true });
@@ -373,6 +422,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse({ ok: true });
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
+      case "healNow": return sendResponse(await healTab(msg.id, true));
       case "openWindow": {
         const { dashWin, dashBounds, dashSide } = await chrome.storage.local.get(["dashWin", "dashBounds", "dashSide"]);
         const side = msg.side || null;
@@ -455,6 +505,7 @@ chrome.alarms.onAlarm.addListener(async alarm => {
     render().catch(() => {});
 setTimeout(() => probeGuards(true).catch(() => {}), 2000);
     probeGuards(false).catch(() => {});
+    healTick().catch(() => {});
     pump();
   }
 });

@@ -13,7 +13,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // One shared "browser profile": localStorage + Web Locks are shared by all tabs of the origin.
 function makeProfile(cfg) {
   const store = new Map();
-  store.set("a429:cfg", JSON.stringify(Object.assign({ enabled: true, timeScale: 0.001, windowMs: 200, holdMaxMs: 5000 }, cfg || {})));
+  store.set("a429:cfg2", JSON.stringify(Object.assign({ enabled: true, timeScale: 0.001, windowMs: 200, holdMaxMs: 5000 }, cfg || {})));
   const chains = new Map();
   const locks = {
     request(name, opts, fn) {
@@ -36,6 +36,11 @@ function makeTab(profile, fetchImpl) {
       removeItem: k => profile.store.delete(k)
     },
     navigator: { locks: profile.locks },
+    document: {
+      visibilityState: "visible", _l: [],
+      addEventListener(t, f) { if (t === "visibilitychange") this._l.push(f); },
+      removeEventListener(t, f) { this._l = this._l.filter(x => x !== f); }
+    },
     CustomEvent: class { constructor(t, o) { this.type = t; this.detail = o && o.detail; } },
     dispatchEvent(e) { events.push(JSON.parse(e.detail)); return true; },
     URL, Request, DOMException, Date, Math, JSON, Promise, Number, String, Object, Array, Map, Error, setTimeout, clearTimeout
@@ -43,7 +48,8 @@ function makeTab(profile, fetchImpl) {
   win.window = win;
   vm.createContext(win);
   vm.runInContext(code, win);
-  return { win, events, fetch: (u, i) => win.window.fetch(u, i) };
+  const setVisible = v => { win.document.visibilityState = v ? "visible" : "hidden"; win.document._l.slice().forEach(f => f()); };
+  return { win, events, setVisible, fetch: (u, i) => win.window.fetch(u, i) };
 }
 
 const DETAIL = "/backend-api/conversations/aaaa-bbbb";
@@ -150,4 +156,109 @@ test("success clears the failure level and cooldown", async () => {
   await tab.fetch(DETAIL);
   assert.equal(profile.store.get("a429:fl:detail"), undefined);
   assert.equal(profile.store.get("a429:cd:detail"), undefined);
+});
+
+test("v0.4: a hidden tab does NOT load history until it becomes visible", async () => {
+  const profile = makeProfile();
+  let sent = 0;
+  const tab = makeTab(profile, async () => { sent++; return { status: 200, headers: new Map() }; });
+  tab.setVisible(false);
+  const p = tab.fetch(DETAIL);
+  await sleep(150);
+  assert.equal(sent, 0, "hidden tab must not hit the server");
+  tab.setVisible(true);
+  const r = await p;
+  assert.equal(r.status, 200);
+  assert.equal(sent, 1);
+});
+
+test("v0.4: a hidden tab still makes non-history requests (stream/list) normally", async () => {
+  let sent = 0;
+  const tab = makeTab(makeProfile(), async () => { sent++; return { status: 200, headers: new Map() }; });
+  tab.setVisible(false);
+  await tab.fetch("/backend-api/conversations?offset=0&limit=28");
+  assert.equal(sent, 1);
+});
+
+test("v0.4: Retry-After is honored as-is (not stretched by our own backoff)", async () => {
+  let n = 0;
+  const tab = makeTab(makeProfile({ timeScale: 1, windowMs: 100 }), async () => (++n === 1
+    ? { status: 429, headers: new Map([["retry-after", "0.2"]]) }
+    : { status: 200, headers: new Map() }));
+  const t0 = Date.now();
+  const r = await tab.fetch(DETAIL);
+  const dt = Date.now() - t0;
+  assert.equal(r.status, 200);
+  assert.ok(dt < 1500, "waited " + dt + "ms; the old max(retry-after, 2s backoff) would be >= 2000ms");
+});
+
+test("v0.4: many simultaneous 429s escalate the shared failure level ONCE per episode", async () => {
+  const profile = makeProfile({ timeScale: 0.2, windowMs: 100 }); // episode window = 4000ms * 0.2 = 800ms
+  profile.store.set("a429:ceil", JSON.stringify({ detail: 12 }));
+  let calls = 0;
+  const f = async () => (++calls <= 6 ? { status: 429, headers: new Map([["retry-after", "0.05"]]) } : { status: 200, headers: new Map() });
+  const a = makeTab(profile, f), b = makeTab(profile, f);
+  let maxLevel = 0;
+  const watcher = setInterval(() => { maxLevel = Math.max(maxLevel, Number(profile.store.get("a429:fl:detail")) || 0); }, 2);
+  await Promise.all([...Array.from({ length: 4 }, () => a.fetch(DETAIL)), ...Array.from({ length: 4 }, () => b.fetch(DETAIL))]);
+  clearInterval(watcher);
+  assert.ok(maxLevel <= 2, "failure level reached " + maxLevel + " (was ~6 before coalescing)");
+});
+
+test("v0.4: after a 429 episode only ONE probe is in flight until it succeeds", async () => {
+  const profile = makeProfile({ timeScale: 0.01, windowMs: 100 });
+  profile.store.set("a429:ceil", JSON.stringify({ detail: 12 }));
+  const log = []; // {start,end,status}
+  let calls = 0;
+  const f = async () => {
+    const n = ++calls;
+    const rec = { start: Date.now(), n };
+    log.push(rec);
+    await sleep(40);
+    rec.end = Date.now();
+    rec.status = n <= 3 ? 429 : 200;
+    return n <= 3 ? { status: 429, headers: new Map([["retry-after", "0.05"]]) } : { status: 200, headers: new Map() };
+  };
+  const a = makeTab(profile, f), b = makeTab(profile, f);
+  await Promise.all([...Array.from({ length: 3 }, () => a.fetch(DETAIL)), ...Array.from({ length: 3 }, () => b.fetch(DETAIL))]);
+  const probe = log.filter(r => r.status === 200).sort((x, y) => x.start - y.start)[0];
+  assert.ok(probe, "some request must succeed");
+  const overlapping = log.filter(r => r !== probe && r.start > log.find(x => x.n === 3).end - 1 && r.start < probe.end && r.start >= probe.start - 0 && r.n > 3);
+  assert.equal(overlapping.length, 0, "other requests started while the probe was in flight: " + overlapping.length);
+});
+
+test("v0.4: a foreground tab is not starved: it proceeds while a hidden tab's history waits", async () => {
+  const profile = makeProfile();
+  const sentBy = [];
+  const bg = makeTab(profile, async () => { sentBy.push("bg"); return { status: 200, headers: new Map() }; });
+  const fgTab = makeTab(profile, async () => { sentBy.push("fg"); return { status: 200, headers: new Map() }; });
+  bg.setVisible(false);
+  const pb = bg.fetch(DETAIL);
+  const rf = await fgTab.fetch("/backend-api/conversations/zzzz");
+  assert.equal(rf.status, 200);
+  assert.deepEqual(sentBy, ["fg"]);
+  bg.setVisible(true);
+  await pb;
+  assert.deepEqual(sentBy, ["fg", "bg"]);
+});
+
+test("upgrade hand-off: an older guard already wrapping fetch is switched to pass-through, the new guard still protects", async () => {
+  const profile = makeProfile();
+  // what the new bridge writes for previous generations (they read a429:cfg)
+  profile.store.set("a429:cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg2" }));
+  let native = 0, oldIntercepts = 0;
+  const nativeFetch = async () => { native++; return { status: 200, headers: new Map() }; };
+  const oldWrapper = function (i, n) {
+    const c = JSON.parse(profile.store.get("a429:cfg") || "{}");
+    if (c.enabled === false) return nativeFetch(i, n);
+    oldIntercepts++;
+    return nativeFetch(i, n);
+  };
+  const tab = makeTab(profile, oldWrapper); // the new guard installs on top of the old wrapper
+  const r = await tab.fetch(DETAIL);
+  assert.equal(r.status, 200);
+  assert.equal(native, 1);
+  assert.equal(oldIntercepts, 0, "the old generation must not act any more");
+  assert.ok(profile.store.get("a429:led:detail"), "the new guard reserved a slot in the shared ledger");
+  assert.equal(tab.win.window.__A429_GUARD2__, true);
 });

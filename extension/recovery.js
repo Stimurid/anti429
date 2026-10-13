@@ -14,9 +14,10 @@
 // (stream-observer.js); independent implementation — see THIRD_PARTY_NOTICES.md.
 (() => {
   "use strict";
-  if (window.__A429_RECOVERY__) return;
+  if (window.__A429_RECOVERY2__) return;
   const A = window.A429;
   if (!A) return;
+  window.__A429_RECOVERY2__ = true;
   window.__A429_RECOVERY__ = true;
 
   const NS = "a429:";
@@ -34,7 +35,7 @@
   const VALIDATE_MAX_MS = 1500;
 
   const readJSON = (k, d) => { try { const v = localStorage.getItem(NS + k); return v ? JSON.parse(v) : d; } catch { return d; } };
-  const cfg = () => Object.assign({ enabled: true, recovery: true, timeScale: 1 }, readJSON("cfg", {}));
+  const cfg = () => Object.assign({ enabled: true, recovery: true, timeScale: 1 }, readJSON("cfg2", {}));
   const T = ms => Math.max(1, Math.round(ms * (Number(cfg().timeScale) || 1))); // timeScale is a test hook
   const active = () => { const c = cfg(); return c.enabled !== false && c.recovery !== false; };
 
