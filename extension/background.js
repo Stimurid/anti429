@@ -10,6 +10,17 @@ const DEFAULT_CFG = {
   loopStream: 5,          // stream_status/resume / 60 s
   loopMb10: 100,          // MB transferred in 10 min
   restoreGapSec: 12,      // pause between tabs when restoring a saved session
+  reaper: true,           // account-wide audit: stop chats stuck on IS_STREAMING with a frozen update_time
+  reaperIdleMs: 30 * 60000,    // idle (since update_time) required before a chat may be stopped
+  reaperConfirmMs: 10 * 60000, // the SAME update_time must be seen again at least this much later
+  reaperEveryMs: 60 * 60000,   // audit period when nothing is under suspicion
+  reaperFastMs: 5 * 60000,     // audit period while there are suspects
+  reaperLookbackMs: 14 * 86400000, // only chats updated within this window are checked
+  reaperMaxStopsPerDay: 30,
+  reaperPaceMs: 2000,          // one audit request per 2 s (<= 5 per 10 s)
+  reaperMaxStatus: 20,         // stream_status checks per audit (the backlog drains over several audits)
+  reaperDeepEveryMs: 24 * 3600000, // full walk through all lists + projects at most this often
+  reaperRateBackoffMs: 30 * 60000, // after a 429 the audit sleeps this long
   autoStop: false,        // send stop_conversation for chats whose stream looks dead (OFF by default: stopping a live run destroys it)
   autoStopMin: 45,        // ... only after IS_STREAMING was observed this long AND the resume breaker tripped
   autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
@@ -106,6 +117,7 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
   if (!u) return;
   const now = Date.now();
   const fam = A.classify(details.method, u.pathname);
+  if (reaperAuditing && (fam === "list" || fam === "stream")) return; // the reaper's own paced requests
   if (details.tabId >= 0) {
     const s = tabStats(details.tabId);
     s.req.push(now);
@@ -121,6 +133,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   if (!u) return;
   const now = Date.now();
   const fam = A.classify(details.method, u.pathname);
+  if (reaperAuditing && (fam === "list" || fam === "stream")) return;
   if (details.tabId >= 0 && details.statusCode === 200) {
     const len = Number(header(details.responseHeaders, "content-length"));
     if (Number.isFinite(len) && len > 0) tabStats(details.tabId).bytes.push({ ts: now, b: len });
@@ -301,6 +314,104 @@ function calmNow(now) {
   return A.isCalm(A.FAMILY_IDS.map(id => ({ id, cd: F[id].cd, last429: F[id].last429, starts: F[id].starts })), now, cfg);
 }
 
+// ---------- zombie reaper ----------
+// Finds chats whose server-side stream is dead (IS_STREAMING, update_time frozen) and sends Stop on its own.
+// State lives in chrome.storage.local ("reaper"): obs = suspects, chk = update_time at which a chat was last seen
+// COMPLETE (so the next audit can skip it), log = recent actions for the dashboard.
+const convOfUrl = u => { const m = String(u || "").split("/c/")[1]; return m ? m.split(/[/?#]/)[0] : null; };
+let reaperBusy = false;
+let reaperAuditing = false;
+
+async function reaperState() {
+  const { reaper } = await chrome.storage.local.get("reaper");
+  return Object.assign({ obs: {}, chk: {}, log: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 } }, reaper || {});
+}
+
+async function reaperTick(force) {
+  if (reaperBusy) return { busy: true };
+  if (cfg.reaper === false && !force) return { off: true };
+  reaperBusy = true;
+  try {
+    const now = Date.now();
+    const R = await reaperState();
+    const suspects = Object.keys(R.obs).filter(id => R.obs[id].status === "IS_STREAMING");
+    const every = suspects.length ? cfg.reaperFastMs : cfg.reaperEveryMs;
+    if (!force && now - R.lastAudit < every) return { skipped: true };
+    // Never add load while the limiter is busy: no cooldown, no recent 429, nobody loading history right now.
+    if (!force && !calmNow(now)) return { notCalm: true };
+    const deep = force || !R.lastDeep || now - R.lastDeep > cfg.reaperDeepEveryMs;
+    const tabs = (await chatTabs()).filter(t => !t.discarded);
+    if (!tabs.length) return { noTab: true };
+    const tab = tabs.find(t => t.active) || tabs[0];
+    const generating = new Set(tabs.filter(t => P[t.id] && P[t.id].generating).map(t => convOfUrl(t.url)).filter(Boolean));
+
+    let scan = null;
+    reaperAuditing = true; // the audit's own requests are not the user's load: keep them out of the meters/learning
+    try {
+      scan = await chrome.tabs.sendMessage(tab.id, { type: "a429_scan", params: {
+        idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: Object.keys(R.obs),
+        paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus, maxList: deep ? 224 : 56, projectPages: deep ? 6 : 1,
+        skip: Object.fromEntries(Object.entries(R.chk).filter(([, v]) => v.st === "COMPLETE").map(([k, v]) => [k, v.u])),
+        projectIds: [...new Set(tabs.map(t => (String(t.url).split("/g/")[1] || "").split("/")[0]).filter(Boolean))]
+      } });
+    } catch {}
+    reaperAuditing = false;
+    R.lastAudit = now;
+    if (scan && scan.ok) { R.lastReqs = scan.requests || 0; R.lastMs = scan.ms || 0; if (deep && !scan.rate) R.lastDeep = now; }
+    if (!scan || !scan.ok) { R.lastError = (scan && scan.reason) || "no-bridge"; await chrome.storage.local.set({ reaper: R }); return { error: R.lastError }; }
+    R.lastError = null;
+    if (scan.rate) { R.lastRate = now; R.lastAudit = now - every + cfg.reaperRateBackoffMs; } // 429: back off for a long time
+
+    const day = new Date(now).toISOString().slice(0, 10);
+    if (R.stopsDay.day !== day) R.stopsDay = { day, n: 0 };
+    const stopped = [];
+    for (const it of scan.items) {
+      const st = scan.statuses[it.id];
+      const known = R.chk[it.id];
+      const status = st !== undefined ? st : (known && known.u === it.u ? known.st : undefined);
+      if (status === undefined) continue; // not checked this time (too recent / over the cap)
+      if (status === "COMPLETE") { R.chk[it.id] = { u: it.u, st: "COMPLETE" }; delete R.obs[it.id]; continue; }
+      const v = A.reaperVerdict(R.obs[it.id] || null, { status, updMs: it.u, generatingTab: generating.has(it.id) }, now,
+        { idleMs: cfg.reaperIdleMs, confirmMs: cfg.reaperConfirmMs });
+      if (v.rec) R.obs[it.id] = Object.assign({}, v.rec, { t: it.t });
+      else delete R.obs[it.id];
+      if (v.action === "stop" && R.stopsDay.n < cfg.reaperMaxStopsPerDay) {
+        let r = null;
+        try { r = await chrome.tabs.sendMessage(tab.id, { type: "a429_stop", conv: it.id }); } catch {}
+        R.stopsDay.n++;
+        R.log.unshift({ id: it.id, t: it.t, at: Date.now(), ok: !!(r && r.ok) });
+        if (r && r.ok) { stopped.push(it.id); R.obs[it.id] = { status: "IS_STOP_REQUESTED", updMs: it.u, since: Date.now(), t: it.t }; }
+      }
+    }
+    // forget what disappeared from the lists / went stale
+    const alive = new Set(scan.items.map(i => i.id));
+    for (const id of Object.keys(R.obs)) if (!alive.has(id) && now - (R.obs[id].since || 0) > 3 * 86400000) delete R.obs[id];
+    for (const id of Object.keys(R.chk)) if (!alive.has(id)) delete R.chk[id];
+    R.log = R.log.slice(0, 40);
+    await chrome.storage.local.set({ reaper: R });
+    return { scanned: scan.items.length, checked: Object.keys(scan.statuses).length, stopped, rate: !!scan.rate };
+  } finally { reaperBusy = false; reaperAuditing = false; }
+}
+
+async function reaperSummary() {
+  const R = await reaperState();
+  const now = Date.now();
+  const entries = Object.entries(R.obs);
+  return {
+    on: cfg.reaper !== false,
+    lastAuditAgoSec: R.lastAudit ? Math.round((now - R.lastAudit) / 1000) : null,
+    watching: entries.filter(([, o]) => o.status === "IS_STREAMING").length,
+    stopping: entries.filter(([, o]) => o.status === "IS_STOP_REQUESTED").length,
+    stoppedToday: R.stopsDay.day === new Date(now).toISOString().slice(0, 10) ? R.stopsDay.n : 0,
+    rateLimited: !!(R.lastRate && now - R.lastRate < 30 * 60000),
+    lastReqs: R.lastReqs || 0,
+    lastSec: Math.round((R.lastMs || 0) / 1000),
+    deepAgoH: R.lastDeep ? Math.round((now - R.lastDeep) / 360000) / 10 : null,
+    error: R.lastError,
+    log: R.log.slice(0, 8).map(l => ({ t: l.t, agoMin: Math.round((now - l.at) / 60000), ok: l.ok }))
+  };
+}
+
 async function stopStream(id) {
   // Reserve BEFORE sending: two overlapping ticks must never send "Stop" twice for the same chat.
   const prev = STOP[id];
@@ -339,6 +450,7 @@ async function healTab(id, manual) {
 
 let healBusy = false;
 async function healTick() {
+  reaperTick(false).catch(() => {});
   autoStopTick().catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   healBusy = true;
@@ -469,6 +581,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "protectTabs": return sendResponse(await protectOpenTabs());
       case "healNow": return sendResponse(await healTab(msg.id, true));
       case "stopStream": return sendResponse(await stopStream(msg.id));
+      case "reaperRun": return sendResponse(await reaperTick(true));
       case "markDead": {
         // the user says: this chat's stream is stuck. Flag it dead for 20 min and reload the tab ONCE.
         let res = null;
@@ -512,7 +625,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "snapshot": {
         probeGuards(false).catch(() => {});
         const { sessions = [], restoreQueue = [] } = await chrome.storage.local.get(["sessions", "restoreQueue"]);
-        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length }));
+        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary() }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
       case "focus": {

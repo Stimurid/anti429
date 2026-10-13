@@ -90,13 +90,90 @@
     }
     return { clicked: false, reason: "no-banner" };
   };
+  // ---- read-only account audit (runs inside the page's own session; the token stays in this closure) ----
+  // Lists the user's conversations (main list + every project seen), then asks stream_status for the ones that have
+  // been idle long enough. Slow on purpose (250 ms between calls) and stops at the first 429.
+  const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+  async function scanAccount(p) {
+    const pace = Math.max(0, p.paceMs == null ? 2000 : p.paceMs); // one request per `pace` ms: stay far below the limiters
+    const t0 = Date.now();
+    const out = { ok: false, items: [], statuses: {}, rate: false, errors: 0, requests: 0, ms: 0 };
+    let tok = null;
+    try { tok = (await (await fetch("/api/auth/session", { credentials: "include" })).json()).accessToken; } catch {}
+    if (!tok) return { ok: false, reason: "no-session" };
+    const H = { Authorization: "Bearer " + tok };
+    let lastAt = 0;
+    const get = async url => {
+      // spacing is enforced HERE, before every single request, so no code path can ever burst
+      const wait = lastAt + pace - Date.now();
+      if (wait > 0) await sleepMs(wait);
+      lastAt = Date.now();
+      let r;
+      out.requests++;
+      try { r = await fetch(url, { credentials: "include", headers: H }); } catch { out.errors++; return null; }
+      if (r.status === 429) { out.rate = true; return null; }
+      if (!r.ok) { out.errors++; return null; }
+      return r;
+    };
+    const seen = new Set();
+    const gizmos = new Set(p.projectIds || []);
+    const add = (it, g) => {
+      if (!it || !it.id || seen.has(it.id)) return;
+      seen.add(it.id);
+      if (it.gizmo_id) gizmos.add(it.gizmo_id);
+      out.items.push({ id: it.id, t: String(it.title || "").slice(0, 40), u: Date.parse(it.update_time) || 0, g: it.gizmo_id || g || null });
+    };
+    for (let off = 0; off < (p.maxList || 112) && !out.rate; off += 28) {
+      const r = await get("/backend-api/conversations?offset=" + off + "&limit=28&order=updated");
+      if (!r) break;
+      const j = await r.json();
+      if (!j.items || !j.items.length) break;
+      j.items.forEach(it => add(it, null));
+    }
+    for (const g of gizmos) {
+      if (out.rate) break;
+      let cur = "0";
+      for (let i = 0; i < (p.projectPages || 4); i++) {
+        const r = await get("/backend-api/gizmos/" + g + "/conversations?cursor=" + cur + "&limit=25");
+        if (!r) break;
+        const j = await r.json();
+        (j.items || []).forEach(it => add(it, g));
+        if (!j.cursor || !(j.items || []).length) break;
+        cur = j.cursor;
+        }
+    }
+    const now = Date.now();
+    const skip = p.skip || {};
+    const suspects = [], fresh = [];
+    for (const it of out.items) {
+      if ((p.checkIds || []).includes(it.id)) { suspects.push(it.id); continue; }
+      if (skip[it.id] && skip[it.id] === it.u) continue; // already known COMPLETE at this update_time
+      if (it.u && now - it.u <= (p.lookbackMs || 14 * 86400000)) fresh.push(it);
+    }
+    fresh.sort((a, b) => b.u - a.u); // most recently active first: new zombies are caught early, the old backlog drains over time
+    const want = suspects.concat(fresh.map(x => x.id));
+    for (const id of want.slice(0, p.maxStatus || 20)) {
+      if (out.rate) break;
+      const r = await get("/backend-api/conversation/" + id + "/stream_status");
+      if (!r) continue;
+      try { const j = await r.json(); out.statuses[id] = (j && j.status) || null; } catch {}
+    }
+    out.ok = true;
+    out.ms = Date.now() - t0;
+    return out;
+  }
+
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg && msg.type === "a429_scan" && sender.id === chrome.runtime.id) {
+        scanAccount(msg.params || {}).then(sendResponse, () => sendResponse({ ok: false, reason: "scan-error" }));
+        return true; // async response
+      }
       if (msg && msg.type === "a429_stop" && sender.id === chrome.runtime.id) {
         // The same request the page's own "Stop" button sends. Runs with the user's own session; the access token
         // stays in this local variable (never stored, logged or sent anywhere else).
         (async () => {
-          const m = location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
+          const m = msg.conv ? [null, msg.conv] : location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
           if (!m) return sendResponse({ ok: false, reason: "no-conversation-in-url" });
           try {
             const sess = await (await fetch("/api/auth/session", { credentials: "include" })).json();

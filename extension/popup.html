@@ -39,6 +39,16 @@
   </section>
 
   <section>
+    <div class="row between">
+      <h2>Зависшие потоки аккаунта</h2>
+      <button id="btnReaper" class="small" title="Пройти по всем вашим чатам прямо сейчас">Проверить сейчас</button>
+    </div>
+    <p class="note" id="reaperLine">…</p>
+    <div id="reaperLog"></div>
+    <label class="chk"><input type="checkbox" id="chkReaper"> Сам находить и останавливать зависшие потоки (IS_STREAMING, update_time не меняется ≥ 30 мин и подтверждено повторной проверкой)</label>
+  </section>
+
+  <section>
     <h2>Сессия</h2>
     <div class="actions">
       <button id="btnSave">Сохранить открытые чаты</button>

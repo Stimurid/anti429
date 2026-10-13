@@ -158,6 +158,30 @@
     return { ok: true, reason: null };
   }
 
+  // ---- zombie reaper: verdict for ONE conversation (pure) ----
+  // A live run keeps moving the conversation's update_time; a dead stream leaves it frozen while stream_status keeps
+  // saying IS_STREAMING. So: IS_STREAMING + the SAME update_time at two checks >= confirmMs apart + idle >= idleMs.
+  // (resume 404 is NOT used: it also answers 404 for finished chats and for live runs nobody can attach to.)
+  // prev: { status, updMs, since } | null ; cur: { status, updMs, generatingTab } ; returns { action, reason, rec }
+  const REAPER_DEFAULTS = { idleMs: 30 * 60000, confirmMs: 10 * 60000 };
+  function reaperVerdict(prev, cur, now, cfg) {
+    const c = Object.assign({}, REAPER_DEFAULTS, cfg || {});
+    const out = (action, reason, rec) => ({ action, reason, rec: rec || null });
+    if (!cur || !cur.status || cur.status === "COMPLETE") return out("clear", "not-streaming");
+    if (cur.status === "IS_STOP_REQUESTED") {
+      return out("stopping", "stop-requested", { status: cur.status, updMs: cur.updMs, since: (prev && prev.since) || now });
+    }
+    if (cur.status !== "IS_STREAMING") return out("clear", "other-status");
+    if (!Number.isFinite(cur.updMs) || cur.updMs <= 0) return out("watch", "no-update-time", { status: cur.status, updMs: 0, since: now });
+    const same = !!(prev && prev.status === "IS_STREAMING" && prev.updMs === cur.updMs);
+    const rec = { status: cur.status, updMs: cur.updMs, since: same ? prev.since : now };
+    if (cur.generatingTab) return out("watch", "visible-generation", { status: cur.status, updMs: cur.updMs, since: now });
+    if (now - cur.updMs < c.idleMs) return out("watch", "recently-active", rec);
+    if (!same) return out("watch", "first-sight", rec);
+    if (now - rec.since < c.confirmMs) return out("watch", "confirming", rec);
+    return out("stop", "stagnant", rec);
+  }
+
   // Should the extension itself send "Stop" for a chat whose server-side stream looks dead?
   // t: { status, since, dead, lastStopAt }  (status = last stream_status seen, since = when IS_STREAMING was first seen,
   // dead = the resume-404 circuit breaker has tripped).  Deliberately conservative: stopping a LIVE long run would destroy it.
@@ -217,6 +241,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
+    reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,
     versionGreater, isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
     canDiscard,

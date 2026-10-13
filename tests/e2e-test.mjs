@@ -84,11 +84,19 @@ function limited(kind, max, now, res) {
 const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(crt) }, (req, res) => {
   const now = Date.now();
   const u = new URL(req.url, "https://chatgpt.com");
+  if ((u.pathname === "/backend-api/conversations" && req.method === "GET") || /\/conversation\/aaaaaaaa[^/]*\/stream_status$/.test(u.pathname) || /^\/backend-api\/gizmos\//.test(u.pathname)) (lim.auditTimes = lim.auditTimes || []).push({ t: Date.now(), p: u.pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '<id>').slice(0, 60) + (u.search ? '?' : '') });
+  if (u.pathname === "/backend-api/conversations" && req.method === "GET" && lim.listRate) { res.statusCode = 429; res.setHeader("retry-after", "30"); return res.end("{}"); }
+  if (u.pathname === "/backend-api/conversations" && req.method === "GET") {
+    const arr = (lim.convs || []).map(c => ({ id: c.id, title: c.title, update_time: new Date(c.live ? Date.now() : c.upd).toISOString(), async_status: null, gizmo_id: null }));
+    res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ items: u.searchParams.get("offset") === "0" ? arr : [] }));
+  }
+  if (/^\/backend-api\/gizmos\/[^/]+\/conversations$/.test(u.pathname)) { res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ items: [], cursor: null })); }
   if (u.pathname === "/api/auth/session") { res.setHeader("content-type", "application/json"); return res.end('{"accessToken":"tok"}'); }
   if (u.pathname === "/backend-api/stop_conversation" && req.method === "POST") {
     let raw = ""; req.on("data", c => (raw += c));
     return req.on("end", () => {
       (lim.stops = lim.stops || []).push({ body: raw, auth: req.headers.authorization || "" });
+      try { const cid = JSON.parse(raw).conversation_id; const cc = (lim.convs || []).find(c => c.id === cid); if (cc) { cc.status = "IS_STOP_REQUESTED"; cc.upd = Date.now(); cc.live = false; } } catch {}
       res.setHeader("content-type", "application/json"); res.end('{"status":"ok","last_message_id":null}');
     });
   }
@@ -106,7 +114,9 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
   if (/^\/backend-api\/conversation\/[^/]+\/stream_status$/.test(u.pathname)) {
     if (limited("stream", MAX_STREAM, now, res)) return;
     res.setHeader("content-type", "application/json");
-    return res.end(JSON.stringify({ status: u.pathname.includes("/resume") ? "IS_STREAMING" : "IS_STREAMING" }));
+    const cid = u.pathname.split("/")[3];
+    const cc = (lim.convs || []).find(c => c.id === cid);
+    return res.end(JSON.stringify({ status: cc ? cc.status : "IS_STREAMING" }));
   }
   if (u.pathname === "/backend-api/f/conversation/resume" && req.method === "POST") {
     let raw = ""; req.on("data", c => (raw += c));
@@ -465,6 +475,45 @@ try {
   await sleep(12000);
   check("auto-stop is NOT repeated for the same chat", (lim.stops || []).length === 1, { stops: (lim.stops || []).length });
   await call({ type: "setCfg", patch: { autoStop: false, autoStopMin: 45 } });
+
+  // 13) the reaper: finds the frozen IS_STREAMING chat by ITSELF, never touches a live or a finished one
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { autoStop: false, reaper: true, reaperIdleMs: 3000, reaperConfirmMs: 4000, reaperEveryMs: 4000, reaperFastMs: 4000, reaperPaceMs: 400, calmMs: 1000 } });
+  await sleep(1500);
+  await resetMock();
+  lim.convs = [
+    { id: "aaaaaaaa-0000-4000-8000-00000000a001", title: "frozen zombie", status: "IS_STREAMING", upd: Date.now() - 3 * 3600000 },
+    { id: "aaaaaaaa-0000-4000-8000-00000000a002", title: "live long run", status: "IS_STREAMING", live: true },
+    { id: "aaaaaaaa-0000-4000-8000-00000000a003", title: "finished chat", status: "COMPLETE", upd: Date.now() - 5 * 3600000 }
+  ];
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/reaper-host', active:true}).then(t=>t.id)");
+  let reaped = false;
+  for (let i = 0; i < 80 && !reaped; i++) { reaped = (lim.stops || []).length >= 1; if (!reaped) await sleep(1000); }
+  check("reaper: the frozen IS_STREAMING chat was found and stopped automatically", reaped, lim.stops);
+  const stoppedIds = (lim.stops || []).map(x => JSON.parse(x.body).conversation_id);
+  check("reaper: ONLY the frozen chat was stopped (not the live run, not the finished chat)", stoppedIds.length === 1 && stoppedIds[0].endsWith("a001"), stoppedIds);
+  await sleep(14000);
+  check("reaper: the stopped chat is not stopped again", (lim.stops || []).length === 1, { stops: (lim.stops || []).length });
+  const rs = (await snap()).reaper;
+  check("reaper: the dashboard reports what it did", rs && rs.stoppedToday >= 1 && rs.log.length >= 1, rs);
+  const atRaw = (lim.auditTimes || []).slice().sort((a, b) => a.t - b.t);
+  const at = atRaw.map(x => x.t);
+  const gaps = at.slice(1).map((t, i) => t - at[i]);
+  const tight = atRaw.slice(1).map((x, i) => ({ gap: x.t - atRaw[i].t, a: atRaw[i].p, b: x.p })).filter(x => x.gap < 320).slice(0, 4);
+  check("reaper: audit requests are PACED (>= ~400 ms apart, never a burst)", at.length >= 4 && Math.min(...gaps) >= 320, { requests: at.length, minGapMs: gaps.length ? Math.min(...gaps) : null, tight });
+  check("reaper: the dashboard states the audit's own cost", rs && rs.lastReqs > 0 && rs.lastSec >= 0, { lastReqs: rs && rs.lastReqs, lastSec: rs && rs.lastSec });
+
+  // 14) a 429 on the audit: stop immediately and sleep (30 min), instead of retrying
+  lim.listRate = true;
+  let rateRun = null;
+  for (let i = 0; i < 20; i++) { rateRun = await call({ type: "reaperRun" }); if (rateRun && !rateRun.busy) break; await sleep(700); }
+  const before429 = (lim.auditTimes || []).length; // counted AFTER the (single) request that got the 429
+  check("reaper: a 429 stops the audit at once and is reported", rateRun && rateRun.rate === true, rateRun);
+  await sleep(9000);
+  const listCalls429 = (lim.auditTimes || []).length - before429;
+  check("reaper: after a 429 it does NOT keep hammering (backs off)", listCalls429 === 0, { requestsAfter429: listCalls429 });
+  lim.listRate = false;
+  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 60 * 60000, reaperFastMs: 5 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));

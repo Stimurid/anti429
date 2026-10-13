@@ -180,3 +180,33 @@ test("shouldAutoStop: conservative - needs opt-in, a dead stream, long IS_STREAM
   assert.equal(A.shouldAutoStop(Object.assign({}, base, { lastStopAt: now - 3600 * 1000 }), now, { autoStop: true }), false, "stop cooldown");
   assert.equal(A.shouldAutoStop(Object.assign({}, base, { lastStopAt: now - 7 * 3600 * 1000 }), now, { autoStop: true }), true, "allowed again after the cooldown");
 });
+
+test("reaperVerdict: stop only for IS_STREAMING + frozen update_time + idle + confirmed twice", () => {
+  const now = 100 * 3600000, H = 3600000;
+  const cfg = { idleMs: 30 * 60000, confirmMs: 10 * 60000 };
+  const zombie = { status: "IS_STREAMING", updMs: now - 5 * H };
+  let v = A.reaperVerdict(null, zombie, now, cfg);
+  assert.equal(v.action, "watch"); assert.equal(v.reason, "first-sight");
+  v = A.reaperVerdict(v.rec, zombie, now + 5 * 60000, cfg);
+  assert.equal(v.reason, "confirming", "needs confirmMs between the two checks");
+  v = A.reaperVerdict(v.rec, zombie, now + 11 * 60000, cfg);
+  assert.equal(v.action, "stop"); assert.equal(v.reason, "stagnant");
+  // a live run moves update_time: the clock restarts and it is never stopped
+  const live = A.reaperVerdict({ status: "IS_STREAMING", updMs: now - 5 * H, since: now - 20 * 60000 }, { status: "IS_STREAMING", updMs: now - 60000 }, now, cfg);
+  assert.equal(live.action, "watch"); assert.equal(live.reason, "recently-active");
+  // changed update_time -> restart even if idle
+  const moved = A.reaperVerdict({ status: "IS_STREAMING", updMs: now - 6 * H, since: now - 3 * H }, { status: "IS_STREAMING", updMs: now - 5 * H }, now, cfg);
+  assert.equal(moved.reason, "first-sight");
+  assert.equal(moved.rec.since, now);
+});
+
+test("reaperVerdict: completed / stop-requested / other states / visible generation / unknown update_time", () => {
+  const now = 100 * 3600000, cfg = { idleMs: 1000, confirmMs: 1000 };
+  assert.equal(A.reaperVerdict({ status: "IS_STREAMING", updMs: 1, since: 1 }, { status: "COMPLETE", updMs: 1 }, now, cfg).action, "clear");
+  assert.equal(A.reaperVerdict(null, { status: "IS_STOP_REQUESTED", updMs: now }, now, cfg).action, "stopping");
+  assert.equal(A.reaperVerdict(null, { status: "WHATEVER", updMs: 1 }, now, cfg).action, "clear");
+  const gen = A.reaperVerdict({ status: "IS_STREAMING", updMs: 5, since: 1 }, { status: "IS_STREAMING", updMs: 5, generatingTab: true }, now, cfg);
+  assert.equal(gen.action, "watch"); assert.equal(gen.reason, "visible-generation");
+  const unk = A.reaperVerdict({ status: "IS_STREAMING", updMs: 0, since: 1 }, { status: "IS_STREAMING", updMs: 0 }, now, cfg);
+  assert.equal(unk.action, "watch"); assert.equal(unk.reason, "no-update-time", "never stops without a known update_time");
+});

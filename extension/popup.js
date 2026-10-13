@@ -105,6 +105,25 @@ function renderTabs() {
   if (!rows.length) box.append(el("p", { class: "note", text: "Открытых вкладок chatgpt.com нет." }));
 }
 
+function renderReaper() {
+  const r = snap.reaper;
+  if (!r) return;
+  const bits = [];
+  bits.push(r.on ? "авто-режим включён" : "авто-режим выключен");
+  bits.push(r.lastAuditAgoSec == null ? "аудит ещё не было" : `последний аудит ${Math.round(r.lastAuditAgoSec / 60)} мин назад`);
+  bits.push(`подозреваю: ${r.watching}`);
+  bits.push(`останавливается: ${r.stopping}`);
+  bits.push(`остановлено сегодня: ${r.stoppedToday}`);
+  if (r.lastReqs) bits.push(`аудит: ${r.lastReqs} запросов за ${r.lastSec} с`);
+  if (r.deepAgoH != null) bits.push(`полный обход ${r.deepAgoH} ч назад`);
+  if (r.rateLimited) bits.push("лимит ответил 429, повтор позже");
+  if (r.error) bits.push("нет вкладки/сессии для аудита (" + r.error + ")");
+  $("reaperLine").textContent = bits.join(" · ");
+  const box = $("reaperLog");
+  box.replaceChildren();
+  for (const l of r.log) box.append(el("div", { class: "sess" }, el("span", { text: `${l.ok ? "⏹" : "⚠"} ${l.t || "(без названия)"}` }), el("span", { class: "note", text: `${l.agoMin} мин назад` })));
+}
+
 function renderSessions() {
   const box = $("sessions");
   box.replaceChildren();
@@ -136,7 +155,7 @@ async function refresh() {
     snap = await send({ type: "snapshot" });
     tabsNow = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
     if (!snap || snap.error) return;
-    renderHeader(); renderMeters(); renderTabs(); renderSessions();
+    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderReaper();
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
     $("btnProtect").hidden = unprotected === 0;
     $("btnProtect").textContent = `Защитить открытые вкладки (${unprotected})`;
@@ -144,6 +163,7 @@ async function refresh() {
     $("chkEnabled").checked = snap.cfg.enabled !== false;
     $("chkHeal").checked = snap.cfg.autoHeal !== false;
     $("chkAutoStop").checked = snap.cfg.autoStop === true;
+    $("chkReaper").checked = snap.cfg.reaper !== false;
   } catch {}
 }
 
@@ -198,6 +218,8 @@ $("chkAutoStop").onchange = async e => {
   if (e.target.checked && !confirm("Включить авто-стоп?\n\nРасширение само отправит «Стоп» чатам, у которых сервер сообщает «идёт генерация» не меньше 45 минут И продолжить поток не удаётся. Если там была настоящая долгая задача, она будет прервана.")) { e.target.checked = false; return; }
   await send({ type: "setCfg", patch: { autoStop: e.target.checked } });
 };
+$("chkReaper").onchange = async e => { await send({ type: "setCfg", patch: { reaper: e.target.checked } }); };
+$("btnReaper").onclick = async () => { $("btnReaper").disabled = true; await send({ type: "reaperRun" }); $("btnReaper").disabled = false; refresh(); };
 $("chkHeal").onchange = async e => { await send({ type: "setCfg", patch: { autoHeal: e.target.checked } }); };
 $("chkEnabled").onchange = async e => { await send({ type: "setCfg", patch: { enabled: e.target.checked } }); };
 $("gap").onchange = async e => { await send({ type: "setCfg", patch: { restoreGapSec: Math.max(3, Number(e.target.value) || 12) } }); };
