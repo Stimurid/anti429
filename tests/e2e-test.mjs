@@ -229,6 +229,24 @@ try {
   }
   const steps = seen.filter(x => x.n > 0);
   check("tabs were restored one by one, not all at once", steps.length >= 3 && steps[steps.length - 1].n === sess.tabs.length, seen);
+  // 5) after an extension reload the worker forgets which tabs run the guard while the page-side guards keep
+  //    running. 'forgetGuards' reproduces exactly that memory loss; the probe must re-learn it from the pages.
+  const rl = await openTab("https://chatgpt.com/c/reloadtest");
+  await sleep(3500);
+  check("guard attached to a fresh tab", ((await snap()).tabs[(await tabsList()).find(t => t.url.includes("reloadtest")).id] || {}).guard === true);
+  await call({ type: "forgetGuards" });
+  const forgotten = (await snap()).tabs;
+  const liveNow = await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(t=>t.filter(x=>!x.discarded).map(x=>({id:x.id,url:x.url})))");
+  const flaggedBefore = liveNow.filter(t => !(forgotten[t.id] || {}).guard).length;
+  await sleep(5000); // snapshot triggers a throttled probe; the alarm/startup probe also exist
+  await snap();
+  await sleep(1500);
+  const after2 = await snap();
+  const unprot = liveNow.filter(t => !(after2.tabs[t.id] || {}).guard).map(t => t.url);
+  check("after the worker forgot, the probe re-learned every live tab (no false 'без защиты')", liveNow.length >= 3 && unprot.length === 0, { live: liveNow.length, wasFlagged: flaggedBefore, stillUnprotected: unprot });
+  const prot = await call({ type: "protectTabs" });
+  check("'Protect open tabs' injects nothing twice when everything is already protected", prot.injected === 0, prot);
+
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));
   pop.close();

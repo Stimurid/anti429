@@ -281,7 +281,25 @@ async function discardTabs(ids, force) {
 
 // Inject bridge + guard into chatgpt tabs that were open before the extension was installed/updated,
 // so nobody has to F5 twenty tabs at once (that reload burst is exactly the stampede we want to avoid).
+// Ask each tab's page directly whether guard.js is alive there. The 'installed' event alone is not enough:
+// after an extension reload the old page-side guard keeps running but never announces itself again.
+let lastProbe = 0;
+async function probeGuards(force) {
+  const now = Date.now();
+  if (!force && now - lastProbe < 4000) return;
+  lastProbe = now;
+  for (const t of await chatTabs()) {
+    if (t.discarded) { delete G[t.id]; continue; }
+    try {
+      const [r] = await chrome.scripting.executeScript({ target: { tabId: t.id }, world: "MAIN", func: () => !!window.__A429_GUARD__ });
+      if (r && r.result) G[t.id] = true; else delete G[t.id];
+    } catch {}
+  }
+  persistSoon();
+}
+
 async function protectOpenTabs() {
+  await probeGuards(true);
   const tabs = await chatTabs();
   let injected = 0;
   for (const t of tabs) {
@@ -293,7 +311,9 @@ async function protectOpenTabs() {
     } catch {}
     await sleep(150);
   }
-  return { injected, total: tabs.length };
+  await sleep(300);
+  await probeGuards(true);
+  return { injected, total: tabs.length, protectedNow: Object.keys(G).length };
 }
 
 async function saveSession(name) {
@@ -353,7 +373,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse({ ok: true });
       }
       case "protectTabs": return sendResponse(await protectOpenTabs());
+      case "forgetGuards": { for (const k of Object.keys(G)) delete G[k]; return sendResponse({ ok: true }); } // diagnostic: mimics what an extension reload does to the worker's memory
       case "snapshot": {
+        probeGuards(false).catch(() => {});
         const { sessions = [], restoreQueue = [] } = await chrome.storage.local.get(["sessions", "restoreQueue"]);
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length }));
       }
@@ -408,9 +430,13 @@ chrome.alarms.onAlarm.addListener(async alarm => {
     }
     if (changed) chrome.storage.local.set({ ceilings });
     render().catch(() => {});
+setTimeout(() => probeGuards(true).catch(() => {}), 2000);
+    probeGuards(false).catch(() => {});
     pump();
   }
 });
 chrome.runtime.onInstalled.addListener(async () => { await ready; render().catch(() => {}); setTimeout(() => protectOpenTabs().catch(() => {}), 1500); });
-chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); setTimeout(() => probeGuards(true).catch(() => {}), 3000); });
 render().catch(() => {});
+
+setTimeout(() => probeGuards(true).catch(() => {}), 2000); // service worker (re)start: re-learn which tabs already run the guard
