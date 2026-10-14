@@ -63,6 +63,8 @@ function renderTabs() {
     if (s.generating) chips.push(el("span", { class: "chip gen", text: "⏵ идёт ответ", title: "Сейчас генерируется ответ" }));
     if (s.recovered) chips.push(el("span", { class: "chip rec", text: `↻ ${s.recovered}`, title: "Сколько раз восстановлен поток после resume-404" }));
     if (s.stopReq >= 0) chips.push(el("span", { class: "chip hold", text: `⏹ стоп запрошен${s.stopReq ? ` ${s.stopReq} мин` : ""}`, title: "Сервер принял «Стоп», но поток ещё не освободил состояние (IS_STOP_REQUESTED)." }));
+    const runHere = snap.reaper && snap.reaper.runs.find(x => x.id === convOf(t.url));
+    if (runHere) chips.push(el("span", { class: "chip gen", text: runHere.state === "live" ? "⚙ работает на сервере" : "⚙ давно не обновлялся", title: "Фоновый прогон: страница может показывать «delivery timed out», но работа идёт. Не нажимайте Retry." }));
     if (s.deadStream) chips.push(el("span", { class: "chip warn", text: "☠ поток завис: игнорирую", title: "Сервер «ведёт» генерацию, но возобновить её не удаётся (resume 404 несколько раз). Расширение отвечает странице, что поток завершён, чтобы она перестала долбить лимит. Снимается само через 20 минут." }));
     else if (s.streaming >= 10) chips.push(el("span", { class: "chip hold", text: `⏵ поток идёт ${s.streaming} мин`, title: "Сервер уже давно сообщает IS_STREAMING для этого чата: возможно, генерация зависла." }));
     if (s.broken) chips.push(el("span", { class: "chip warn", text: `⚠ не загрузилась${s.broken.heals ? ` · лечу ×${s.broken.heals}` : ""}`, title: `История вернула ${s.broken.status}. Расширение само нажмёт «Try again», когда лимит успокоится.` }));
@@ -103,6 +105,37 @@ function renderTabs() {
       el("div", { class: "t", text: tabLabel(t), title: t.title || t.url, onclick: () => send({ type: "focus", id: t.id }) }), b, m));
   }
   if (!rows.length) box.append(el("p", { class: "note", text: "Открытых вкладок chatgpt.com нет." }));
+}
+
+const convOf = u => { const m = String(u || "").split("/c/")[1]; return m ? m.split(/[/?#]/)[0] : null; };
+async function openChat(id, g) {
+  const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+  const t = tabs.find(x => String(x.url).includes("/c/" + id));
+  if (t) await send({ type: "focus", id: t.id });
+  else chrome.tabs.create({ url: "https://chatgpt.com/" + (g ? "g/" + g + "/" : "") + "c/" + id });
+}
+
+function renderRuns() {
+  const r = snap.reaper;
+  if (!r) return;
+  const live = r.runs.filter(x => x.state === "live").length;
+  const stalled = r.runs.length - live;
+  $("runsLine").textContent = r.runs.length
+    ? `работают: ${live}` + (stalled ? ` · давно не обновлялись: ${stalled}` : "") + (r.done.length ? ` · недавно завершено: ${r.done.length}` : "")
+    : "сейчас нет известных фоновых прогонов" + (r.done.length ? ` · недавно завершено: ${r.done.length}` : "");
+  const box = $("runsBox");
+  box.replaceChildren();
+  for (const x of r.runs) {
+    const when = x.idleSec == null ? "" : x.idleSec < 90 ? `обновлён ${x.idleSec} с назад` : `обновлён ${Math.round(x.idleSec / 60)} мин назад`;
+    box.append(el("div", { class: "sess" },
+      el("span", { text: `${x.state === "live" ? "⚙" : "⚠"} ${x.t || "(без названия)"} · ${when}`, title: x.state === "live" ? "Работа идёт, время обновления двигается" : "Время обновления давно не менялось: возможно, прогон остановился" }),
+      el("button", { class: "small ghost", text: "Открыть", onclick: () => openChat(x.id, x.g) })));
+  }
+  for (const d of r.done.slice(0, 4)) {
+    box.append(el("div", { class: "sess" },
+      el("span", { class: "note", text: `✓ завершено: ${d.t || "(без названия)"} · ${d.agoMin} мин назад` }),
+      el("button", { class: "small ghost", text: "Открыть", onclick: () => openChat(d.id, d.g) })));
+  }
 }
 
 function renderReaper() {
@@ -155,7 +188,7 @@ async function refresh() {
     snap = await send({ type: "snapshot" });
     tabsNow = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
     if (!snap || snap.error) return;
-    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderReaper();
+    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderRuns(); renderReaper();
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
     $("btnProtect").hidden = unprotected === 0;
     $("btnProtect").textContent = `Защитить открытые вкладки (${unprotected})`;

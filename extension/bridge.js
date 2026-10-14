@@ -122,7 +122,7 @@
       if (!it || !it.id || seen.has(it.id)) return;
       seen.add(it.id);
       if (it.gizmo_id) gizmos.add(it.gizmo_id);
-      out.items.push({ id: it.id, t: String(it.title || "").slice(0, 40), u: Date.parse(it.update_time) || 0, g: it.gizmo_id || g || null });
+      out.items.push({ id: it.id, t: String(it.title || "").slice(0, 40), u: Date.parse(it.update_time) || 0, g: it.gizmo_id || g || null, a: it.async_status == null ? null : it.async_status });
     };
     for (let off = 0; off < (p.maxList || 112) && !out.rate; off += 28) {
       const r = await get("/backend-api/conversations?offset=" + off + "&limit=28&order=updated");
@@ -147,7 +147,7 @@
     const skip = p.skip || {};
     const suspects = [], fresh = [];
     for (const it of out.items) {
-      if ((p.checkIds || []).includes(it.id)) { suspects.push(it.id); continue; }
+      if ((p.checkIds || []).includes(it.id) || it.a === 3) { suspects.push(it.id); continue; } // async_status 3: a run OR a zombie - the status tells which
       if (skip[it.id] && skip[it.id] === it.u) continue; // already known COMPLETE at this update_time
       if (it.u && now - it.u <= (p.lookbackMs || 14 * 86400000)) fresh.push(it);
     }

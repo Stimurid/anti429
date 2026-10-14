@@ -13,7 +13,10 @@ const DEFAULT_CFG = {
   reaper: true,           // account-wide audit: stop chats stuck on IS_STREAMING with a frozen update_time
   reaperIdleMs: 30 * 60000,    // idle (since update_time) required before a chat may be stopped
   reaperConfirmMs: 10 * 60000, // the SAME update_time must be seen again at least this much later
-  reaperEveryMs: 60 * 60000,   // audit period when nothing is under suspicion
+  reaperEveryMs: 15 * 60000,   // audit period when nothing is under suspicion (the head scan is only a few requests)
+  runsEveryMs: 2 * 60000,      // audit period while background runs are being watched
+  runStaleMs: 15 * 60000,      // a run whose update_time did not move for this long is shown as 'stalled'
+  notifyRuns: true,            // desktop notification when a watched background run finishes
   reaperFastMs: 5 * 60000,     // audit period while there are suspects
   reaperLookbackMs: 14 * 86400000, // only chats updated within this window are checked
   reaperMaxStopsPerDay: 30,
@@ -324,7 +327,7 @@ let reaperAuditing = false;
 
 async function reaperState() {
   const { reaper } = await chrome.storage.local.get("reaper");
-  return Object.assign({ obs: {}, chk: {}, log: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 } }, reaper || {});
+  return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 } }, reaper || {});
 }
 
 async function reaperTick(force) {
@@ -336,7 +339,7 @@ async function reaperTick(force) {
     const R = await reaperState();
     if (R.lastError === "no-bridge") await ensureBridges();
     const suspects = Object.keys(R.obs).filter(id => R.obs[id].status === "IS_STREAMING");
-    const every = suspects.length ? cfg.reaperFastMs : cfg.reaperEveryMs;
+    const every = suspects.length ? cfg.reaperFastMs : (Object.keys(R.runs).length ? cfg.runsEveryMs : cfg.reaperEveryMs);
     if (!force && now - R.lastAudit < every) return { skipped: true };
     // Never add load while the limiter is busy: no cooldown, no recent 429, nobody loading history right now.
     if (!force && !calmNow(now)) return { notCalm: true };
@@ -384,6 +387,19 @@ async function reaperTick(force) {
         if (r && r.ok) { stopped.push(it.id); R.obs[it.id] = { status: "IS_STOP_REQUESTED", updMs: it.u, since: Date.now(), t: it.t }; }
       }
     }
+    // background (async) runs: show them as "working on the server" and say when they finish
+    const seenIds = new Set();
+    for (const it of scan.items) {
+      seenIds.add(it.id);
+      const rv = A.runVerdict(R.runs[it.id] || null, { a: it.a, status: scan.statuses[it.id], updMs: it.u }, now, { runStaleMs: cfg.runStaleMs });
+      if (rv.action === "live" || rv.action === "stalled") R.runs[it.id] = Object.assign({}, rv.rec, { t: it.t, g: it.g || null, state: rv.action });
+      else if (rv.action === "done") { notifyRunDone(R, it.id, R.runs[it.id], it.t, now); delete R.runs[it.id]; }
+      else if (rv.action === "ignore") delete R.runs[it.id];
+    }
+    for (const id of Object.keys(R.runs)) {
+      if (seenIds.has(id)) continue;
+      if (A.runVerdict(R.runs[id], null, now, {}).action === "forget") delete R.runs[id];
+    }
     // forget what disappeared from the lists / went stale
     const alive = new Set(scan.items.map(i => i.id));
     for (const id of Object.keys(R.obs)) if (!alive.has(id) && now - (R.obs[id].since || 0) > 3 * 86400000) delete R.obs[id];
@@ -392,6 +408,20 @@ async function reaperTick(force) {
     await chrome.storage.local.set({ reaper: R });
     return { scanned: scan.items.length, checked: Object.keys(scan.statuses).length, stopped, rate: !!scan.rate };
   } finally { reaperBusy = false; reaperAuditing = false; }
+}
+
+function notifyRunDone(R, id, prev, title, now) {
+  const took = prev && prev.firstSeen ? Math.round((now - prev.firstSeen) / 60000) : 0;
+  R.done.unshift({ id, t: title || (prev && prev.t) || "", at: now, tookMin: took, g: (prev && prev.g) || null });
+  R.done = R.done.slice(0, 10);
+  if (cfg.notifyRuns !== false && chrome.notifications) {
+    try {
+      chrome.notifications.create("a429-run-" + id + "-" + now, {
+        type: "basic", iconUrl: "icons/icon128.png", title: "Фоновый прогон завершён",
+        message: (title || "чат") + (took ? " (наблюдали " + took + " мин)" : ""), priority: 1
+      });
+    } catch {}
+  }
 }
 
 async function reaperSummary() {
@@ -409,6 +439,12 @@ async function reaperSummary() {
     lastSec: Math.round((R.lastMs || 0) / 1000),
     deepAgoH: R.lastDeep ? Math.round((now - R.lastDeep) / 360000) / 10 : null,
     error: R.lastError,
+    runs: Object.entries(R.runs).map(([id, r]) => ({
+      id, t: r.t, g: r.g || null, state: r.state,
+      idleSec: r.lastU ? Math.round((now - r.lastU) / 1000) : null,
+      watchedMin: Math.round((now - (r.firstSeen || now)) / 60000)
+    })).sort((a, b) => (a.idleSec || 0) - (b.idleSec || 0)).slice(0, 12),
+    done: R.done.slice(0, 6).map(d => ({ id: d.id, t: d.t, g: d.g || null, agoMin: Math.round((now - d.at) / 60000), tookMin: d.tookMin })),
     log: R.log.slice(0, 8).map(l => ({ t: l.t, agoMin: Math.round((now - l.at) / 60000), ok: l.ok }))
   };
 }

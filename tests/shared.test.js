@@ -210,3 +210,28 @@ test("reaperVerdict: completed / stop-requested / other states / visible generat
   const unk = A.reaperVerdict({ status: "IS_STREAMING", updMs: 0, since: 1 }, { status: "IS_STREAMING", updMs: 0 }, now, cfg);
   assert.equal(unk.action, "watch"); assert.equal(unk.reason, "no-update-time", "never stops without a known update_time");
 });
+
+test("runVerdict: async_status 3 + not streaming = a live run; stale update_time = stalled; leaving 3 = done", () => {
+  const now = 100 * 3600000, cfg = { runStaleMs: 15 * 60000 };
+  let v = A.runVerdict(null, { a: 3, status: "COMPLETE", updMs: now - 20000 }, now, cfg);
+  assert.equal(v.action, "live");
+  assert.equal(v.rec.firstSeen, now);
+  const first = v.rec;
+  v = A.runVerdict(first, { a: 3, status: "COMPLETE", updMs: now + 60000 - 5000 }, now + 60000, cfg);
+  assert.equal(v.action, "live"); assert.equal(v.rec.firstSeen, now, "firstSeen is kept");
+  assert.equal(v.rec.lastMoveAt, now + 60000, "update_time moved -> lastMoveAt advanced");
+  v = A.runVerdict(first, { a: 3, status: "COMPLETE", updMs: now - 20000 }, now + 20 * 60000, cfg);
+  assert.equal(v.action, "stalled", "update_time frozen for 20 min");
+  v = A.runVerdict(first, { a: 4, status: "COMPLETE", updMs: now + 90000 }, now + 120000, cfg);
+  assert.equal(v.action, "done");
+  assert.equal(A.runVerdict(null, { a: 4, status: "COMPLETE", updMs: now }, now, cfg).action, "ignore", "a finished chat we never watched is not 'done'");
+});
+
+test("runVerdict: IS_STREAMING is the zombie domain, never a run; unseen runs are kept 30 min then forgotten", () => {
+  const now = 100 * 3600000;
+  assert.equal(A.runVerdict(null, { a: 3, status: "IS_STREAMING", updMs: now - 5 * 3600000 }, now, {}).action, "ignore");
+  const prev = { firstSeen: now - 600000, lastU: now - 70000, lastSeen: now - 60000, lastMoveAt: now - 70000 };
+  assert.equal(A.runVerdict(prev, null, now, {}).action, "unknown");
+  assert.equal(A.runVerdict(prev, null, now + 40 * 60000, {}).action, "forget");
+  assert.equal(A.runVerdict(null, null, now, {}).action, "ignore");
+});

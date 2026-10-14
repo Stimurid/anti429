@@ -87,7 +87,7 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
   if ((u.pathname === "/backend-api/conversations" && req.method === "GET") || /\/conversation\/aaaaaaaa[^/]*\/stream_status$/.test(u.pathname) || /^\/backend-api\/gizmos\//.test(u.pathname)) (lim.auditTimes = lim.auditTimes || []).push({ t: Date.now(), p: u.pathname.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '<id>').slice(0, 60) + (u.search ? '?' : '') });
   if (u.pathname === "/backend-api/conversations" && req.method === "GET" && lim.listRate) { res.statusCode = 429; res.setHeader("retry-after", "30"); return res.end("{}"); }
   if (u.pathname === "/backend-api/conversations" && req.method === "GET") {
-    const arr = (lim.convs || []).map(c => ({ id: c.id, title: c.title, update_time: new Date(c.live ? Date.now() : c.upd).toISOString(), async_status: null, gizmo_id: null }));
+    const arr = (lim.convs || []).map(c => ({ id: c.id, title: c.title, update_time: new Date(c.live ? Date.now() : c.upd).toISOString(), async_status: c.a == null ? null : c.a, gizmo_id: null }));
     res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ items: u.searchParams.get("offset") === "0" ? arr : [] }));
   }
   if (/^\/backend-api\/gizmos\/[^/]+\/conversations$/.test(u.pathname)) { res.setHeader("content-type", "application/json"); return res.end(JSON.stringify({ items: [], cursor: null })); }
@@ -516,6 +516,34 @@ try {
   check("reaper: after a 429 it does NOT keep hammering (backs off)", listCalls429 === 0, { requestsAfter429: listCalls429 });
   lim.listRate = false;
   await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 60 * 60000, reaperFastMs: 5 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
+
+  // 15) background (async) runs: shown as working, a zombie with the same async_status is NOT a run, completion is reported
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 3000, reaperConfirmMs: 600000, reaperEveryMs: 4000, reaperFastMs: 4000, runsEveryMs: 4000, runStaleMs: 600000, reaperPaceMs: 300, calmMs: 1000, notifyRuns: true } });
+  await ev(pop, "chrome.storage.local.remove('reaper')");   // forget the 429 back-off of scenario 14
+  await sleep(1500);
+  await resetMock();
+  lim.convs = [
+    { id: "bbbbbbbb-0000-4000-8000-00000000b001", title: "async run A", status: "COMPLETE", a: 3, live: true },
+    { id: "bbbbbbbb-0000-4000-8000-00000000b002", title: "async run B (stalled)", status: "COMPLETE", a: 3, upd: Date.now() - 20 * 60000 },
+    { id: "bbbbbbbb-0000-4000-8000-00000000b003", title: "zombie with async 3", status: "IS_STREAMING", a: 3, upd: Date.now() - 3 * 3600000 },
+    { id: "bbbbbbbb-0000-4000-8000-00000000b004", title: "plain finished chat", status: "COMPLETE", a: 4, upd: Date.now() - 4 * 3600000 }
+  ];
+  await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/runs-host', active:true}).then(t=>t.id)");
+  let runsSnap = null;
+  for (let i = 0; i < 50; i++) { runsSnap = (await snap()).reaper; if (runsSnap && runsSnap.runs.length >= 2) break; await sleep(1000); }
+  const runIds = (runsSnap ? runsSnap.runs : []).map(x => x.id.slice(-4)).sort();
+  check("runs: the two async runs are listed (and ONLY them)", JSON.stringify(runIds) === JSON.stringify(["b001", "b002"]), runsSnap && runsSnap.runs);
+  const stA = runsSnap.runs.find(x => x.id.endsWith("b001")), stB = runsSnap.runs.find(x => x.id.endsWith("b002"));
+  check("runs: moving update_time = 'live', frozen for 20 min = 'stalled'", stA && stA.state === "live" && stB && stB.state === "stalled", { a: stA && stA.state, b: stB && stB.state });
+  check("runs: the IS_STREAMING chat is NOT reported as a run (it belongs to the reaper)", !runsSnap.runs.some(x => x.id.endsWith("b003")));
+  lim.convs[0].a = 4; lim.convs[0].live = false; lim.convs[0].upd = Date.now();   // run A finishes
+  let doneSnap = null;
+  for (let i = 0; i < 50; i++) { doneSnap = (await snap()).reaper; if (doneSnap && doneSnap.done.some(x => x.id.endsWith("b001"))) break; await sleep(1000); }
+  check("runs: the finished run moves to 'done' with its title", doneSnap && doneSnap.done.some(x => x.id.endsWith("b001") && x.t === "async run A"), doneSnap && doneSnap.done);
+  const notifs = await ev(pop, "new Promise(r => chrome.notifications.getAll(r)).then(o => Object.keys(o || {}))");
+  check("runs: a desktop notification was raised for the finished run", notifs.some(k => k.indexOf("a429-run-") === 0 && k.indexOf("b001") > 0), notifs);
+  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 15 * 60000, reaperFastMs: 5 * 60000, runsEveryMs: 2 * 60000, runStaleMs: 15 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));
