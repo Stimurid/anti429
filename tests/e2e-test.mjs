@@ -213,6 +213,7 @@ try {
   check("traffic light is red during the cooldown", det.cooling && s.overall === "red", { overall: s.overall, cooldownMs: det.cooldownMs });
   const badge = await ev(pop, "chrome.action.getBadgeText({})");
   check("badge shows seconds of block (e.g. '7s')", /^\d+s$/.test(badge), { badge });
+  check("journal: the 429s are recorded with family, tab and accepted count", Array.isArray(s.journal) && s.journal.some(e => e.e === "429" && e.fam && e.tab != null && e.acc != null), (s.journal || []).slice(-3));
   const learnedCeil = det.ceil;
   await dbg(`/json/close/${bt.id}`); // close the burst tab
 
@@ -530,7 +531,7 @@ try {
   for (let i = 0; i < 40; i++) { const sn = await snap(); const row = Object.entries(sn.tabs).find(([, v]) => v.c429_10 >= 3); if (row) { hs = row; break; } await sleep(1000); }
   check("hibernate: the looping tab accumulated a streak of 429s", !!hs, hs);
   const other = await openTab("https://chatgpt.com/c/hib-other"); // takes the focus: the looping tab is no longer the active one
-  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>{const t=ts.find(x=>(x.url||x.pendingUrl||'').includes('hib-other')); return chrome.tabs.update(t.id,{active:true})})");
+  for (let i = 0; i < 10; i++) { const ok = await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>{const t=ts.find(x=>(x.url||x.pendingUrl||'').includes('hib-other')); return t ? chrome.tabs.update(t.id,{active:true}).then(u=>!!(u&&u.active)) : false})"); if (ok) break; await sleep(500); }
   let slept = false, hl = [];
   for (let i = 0; i < 25 && !slept; i++) { await sleep(1000); hl = await tabsList(); slept = !!(hl.find(t => t.url.includes("hibloop")) || {}).discarded; }
   check("hibernate: the looping tab was put to sleep by itself (discarded, still in the strip)", slept, hl);

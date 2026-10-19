@@ -85,6 +85,34 @@ const ready = (async () => {
   await chrome.storage.local.set({ cfg, ceilings });
 })();
 
+// ---------- journal: what actually happened, kept across restarts (so an incident can be explained afterwards) ----------
+let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
+const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
+function jr(e, data) {
+  JR.push(Object.assign({ t: Date.now(), e }, data || {}));
+  if (JR.length > 400) JR.splice(0, JR.length - 400);
+  if (jrDirty) return;
+  jrDirty = true;
+  setTimeout(async () => { jrDirty = false; await jrReady; try { await chrome.storage.local.set({ journal: JR }); } catch {} }, 4000);
+}
+// once a minute, only if something happened: requests per family, busiest tabs, tab loads, held requests
+async function journalTick(now) {
+  if (now - lastJrMin < 60000) return;
+  lastJrMin = now;
+  const fam = {};
+  for (const id of A.FAMILY_IDS) { const n = A.countIn(F[id].starts, now, 60000); if (n) fam[id] = n; }
+  const top = Object.entries(T).map(([id, s]) => [id, s.req.length, s.c429.length]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  const held = Object.values(H).reduce((a, n) => a + (n || 0), 0);
+  if (!Object.keys(fam).length && !LOADS && !held) return;
+  const topT = [];
+  for (const [id, req, c] of top) {
+    let t = ""; try { t = ((await chrome.tabs.get(Number(id))).title || "").slice(0, 28); } catch {}
+    topT.push({ tab: Number(id), req, c429: c, t });
+  }
+  jr("min", { fam, loads: LOADS, held, top: topT });
+  LOADS = 0;
+}
+
 function persistSoon() {
   if (dirty) return;
   dirty = true;
@@ -180,6 +208,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   f.learned = true;
   f.last429 = now;
   f.c429.push(now);
+  jr("429", { fam, tab: details.tabId, ra: ra ? Math.round(ra / 1000) : null, acc: observed, n10: f.c429.length, tabReq60: details.tabId >= 0 ? A.countIn(tabStats(details.tabId).req, now, 60000) : null });
   f.cd = Math.max(f.cd, now + (ra || 15000));
   if (details.tabId >= 0) tabStats(details.tabId).c429.push(now);
   chrome.storage.local.set({ ceilings, learned: Object.fromEntries(A.FAMILY_IDS.map(i => [i, F[i].learned])) });
@@ -188,7 +217,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
 }, { urls: URLS }, ["responseHeaders"]);
 
 chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; delete STOP[id]; persistSoon(); });
-chrome.tabs.onUpdated.addListener((id, info) => { if (info.status === "loading") { delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
+chrome.tabs.onUpdated.addListener((id, info, tab) => { if (info.status === "loading") { if (tab && String(tab.url || "").startsWith("https://chatgpt.com/")) LOADS++; delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
 
 // ---------- snapshot / render ----------
 function famRow(id, now) {
@@ -481,6 +510,7 @@ async function healTab(id, manual) {
   b.lastHealAt = Date.now();
   if (!manual) lastHealAny = Date.now();
   let res = null;
+  jr("heal", { tab: id, manual: !!manual, n: b.heals });
   try { res = await chrome.tabs.sendMessage(id, { type: "a429_heal" }); } catch {}
   if (res && !res.clicked && res.reason === "no-banner") delete B[id]; // the page already recovered by itself
   persistSoon();
@@ -506,6 +536,7 @@ async function hibernateTick() {
         const { hib = [] } = await chrome.storage.local.get("hib");
         hib.unshift({ id, t: tab.title || tab.url, url: tab.url, at: now, n: stats.c429_10 });
         await chrome.storage.local.set({ hib: hib.slice(0, 20) });
+        jr("hib", { tab: id, n: stats.c429_10 });
         notifyLoop("a429-hib-" + id + "-" + now, "Вкладка усыплена: зациклилась", (tab.title || "вкладка") + " (" + stats.c429_10 + "×429 за 10 мин). Она осталась на месте, кликните по ней, чтобы загрузить.");
       }
     } else if (v.reason === "active" && now - (HIB_NOTIFIED[id] || 0) > 30 * 60000) {
@@ -523,6 +554,7 @@ async function healTick() {
   reaperTick(false).catch(() => {});
   autoStopTick().catch(() => {});
   hibernateTick().catch(() => {});
+  journalTick(Date.now()).catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   healBusy = true;
   try {
@@ -721,7 +753,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "snapshot": {
         probeGuards(false).catch(() => {});
         const { sessions = [], restoreQueue = [] } = await chrome.storage.local.get(["sessions", "restoreQueue"]);
-        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), hib: (await chrome.storage.local.get('hib')).hib || [] }));
+        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
       case "focus": {
@@ -796,8 +828,8 @@ chrome.alarms.onAlarm.addListener(async alarm => {
     pump();
   }
 });
-chrome.runtime.onInstalled.addListener(() => { render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 1500); });
-chrome.runtime.onStartup.addListener(() => { render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 3000); });
+chrome.runtime.onInstalled.addListener(() => { chatTabs().then(t => jr("installed", { tabs: t.length })).catch(() => {}); render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 1500); });
+chrome.runtime.onStartup.addListener(() => { chatTabs().then(t => jr("chrome-start", { tabs: t.length, discarded: t.filter(x => x.discarded).length })).catch(() => {}); render().catch(() => {}); setTimeout(() => startupRepair().catch(() => {}), 3000); });
 render().catch(() => {});
 
 setTimeout(() => startupRepair().catch(() => {}), 2500); // ANY service-worker start (incl. runtime.reload(), which may not fire onInstalled): upgrade page-side code and revive bridges

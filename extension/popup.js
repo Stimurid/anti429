@@ -117,6 +117,21 @@ async function openChat(id, g) {
   else chrome.tabs.create({ url: "https://chatgpt.com/" + (g ? "g/" + g + "/" : "") + "c/" + id });
 }
 
+function renderJournal() {
+  const box = $("jrBox");
+  const hh = t => new Date(t).toTimeString().slice(0, 8);
+  const line = e => {
+    if (e.e === "429") return `${hh(e.t)} 429 ${e.fam} вкладка ${e.tab} · принято до отказа ${e.acc} · retry-after ${e.ra == null ? "?" : e.ra + "с"} · 429 за 10 мин: ${e.n10}`;
+    if (e.e === "min") return `${hh(e.t)} за минуту: ${Object.entries(e.fam).map(([k, v]) => k + " " + v).join(", ") || "запросов нет"} · загрузок вкладок ${e.loads} · держу ${e.held}` + (e.top.length ? " · больше всего: " + e.top.map(x => `«${x.t}» ${x.req}`).join("; ") : "");
+    if (e.e === "chrome-start") return `${hh(e.t)} ЗАПУСК Chrome: вкладок ChatGPT ${e.tabs}, спящих ${e.discarded}`;
+    if (e.e === "installed") return `${hh(e.t)} расширение (пере)установлено, вкладок ${e.tabs}`;
+    if (e.e === "hib") return `${hh(e.t)} вкладка ${e.tab} усыплена (${e.n}×429)`;
+    if (e.e === "heal") return `${hh(e.t)} оживляю вкладку ${e.tab}${e.manual ? " (вручную)" : ""}, попытка ${e.n}`;
+    return `${hh(e.t)} ${e.e}`;
+  };
+  box.textContent = (snap.journal || []).slice(-25).reverse().map(line).join("\n") ||"пока пусто";
+}
+
 function renderHib() {
   const box = $("hibBox"), list = snap.hib || [];
   $("hibSec").hidden = !list.length;
@@ -202,7 +217,7 @@ async function refresh() {
     snap = await send({ type: "snapshot" });
     tabsNow = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
     if (!snap || snap.error) return;
-    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderHib(); renderRuns(); renderReaper();
+    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderJournal(); renderHib(); renderRuns(); renderReaper();
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
     $("btnProtect").hidden = unprotected === 0;
     $("btnProtect").textContent = `Защитить открытые вкладки (${unprotected})`;

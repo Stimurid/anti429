@@ -12,6 +12,7 @@
     try {
       if (items.ceilings) localStorage.setItem(NS + "ceil", JSON.stringify(items.ceilings));
       if (items.cfg) localStorage.setItem(NS + "cfg3", JSON.stringify(items.cfg));
+      if (items.journal) localStorage.setItem(NS + "journal", JSON.stringify(items.journal.slice(-60)));
       // Previous generations of guard.js/recovery.js (already running in this page, impossible to unwrap) read "cfg"
       // (generation 1) and "cfg2" (generation 2): tell them to pass everything straight through. Generation 3+ reads "cfg3".
       localStorage.setItem(NS + "cfg", JSON.stringify({ enabled: false, handedOffTo: "cfg3" }));
@@ -19,13 +20,14 @@
     } catch {}
   };
   const pull = () => {
-    try { chrome.storage.local.get(["ceilings", "cfg"]).then(mirror).catch(() => {}); } catch {}
+    try { chrome.storage.local.get(["ceilings", "cfg", "journal"]).then(mirror).catch(() => {}); } catch {}
   };
   pull();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "local" || !(changes.ceilings || changes.cfg)) return;
-      pull();
+      if (area !== "local") return;
+      if (changes.journal) mirror({ journal: changes.journal.newValue || [] });
+      if (changes.ceilings || changes.cfg) pull();
     });
   } catch {}
 
