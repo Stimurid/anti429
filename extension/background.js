@@ -314,7 +314,7 @@ async function discardTabs(ids, force) {
 
 // ---------- auto-heal of dead tabs ----------
 function calmNow(now) {
-  return A.isCalm(A.FAMILY_IDS.map(id => ({ id, cd: F[id].cd, last429: F[id].last429, starts: F[id].starts })), now, cfg);
+  return A.isCalm(A.FAMILY_IDS.map(id => ({ id, cd: F[id].cd, last429: F[id].last429, starts: F[id].starts, c429: F[id].c429 })), now, cfg);
 }
 
 // ---------- zombie reaper ----------

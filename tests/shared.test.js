@@ -235,3 +235,11 @@ test("runVerdict: IS_STREAMING is the zombie domain, never a run; unseen runs ar
   assert.equal(A.runVerdict(prev, null, now + 40 * 60000, {}).action, "forget");
   assert.equal(A.runVerdict(null, null, now, {}).action, "ignore");
 });
+
+test("isCalm: a long streak of 429s lengthens the quiet period (no poking a blocked account)", () => {
+  const now = 10 * 3600000;
+  const fam = (n, ago) => [{ id: "detail", cd: 0, last429: now - ago, starts: [], c429: Array.from({ length: n }, (_, i) => now - ago - i * 1000) }];
+  assert.equal(A.isCalm(fam(1, 40000), now, { calmMs: 30000 }), true, "one 429, 40 s ago: calm");
+  assert.equal(A.isCalm(fam(9, 120000), now, { calmMs: 30000 }), false, "nine 429s, last 2 min ago: not calm yet");
+  assert.equal(A.isCalm(fam(9, 11 * 60000), now, { calmMs: 30000 }), true, "quiet for 11 min: calm again (cap 10 min)");
+});

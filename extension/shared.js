@@ -235,7 +235,10 @@
     const c = Object.assign({ calmMs: 30000 }, cfg || {});
     for (const f of fams) {
       if (f.cd > now) return false;
-      if (f.last429 && now - f.last429 < c.calmMs) return false;
+      // the more 429s in the last 20 min, the longer the quiet period: poking a blocked account only prolongs the block
+      const recent = (f.c429 || []).filter(t => now - t < 20 * 60000).length;
+      const quiet = Math.max(c.calmMs, Math.min(10 * 60000, recent * 20000));
+      if (f.last429 && now - f.last429 < quiet) return false;
     }
     const hist = fams.filter(f => f.id === "detail" || f.id === "legacy")
       .reduce((n, f) => n + countIn(f.starts || [], now, WINDOW_MS), 0);
