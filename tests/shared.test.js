@@ -243,3 +243,15 @@ test("isCalm: a long streak of 429s lengthens the quiet period (no poking a bloc
   assert.equal(A.isCalm(fam(9, 120000), now, { calmMs: 30000 }), false, "nine 429s, last 2 min ago: not calm yet");
   assert.equal(A.isCalm(fam(9, 11 * 60000), now, { calmMs: 30000 }), true, "quiet for 11 min: calm again (cap 10 min)");
 });
+
+test("shouldHibernate: only a streak of 429s, and never an active / draft / generating / audible tab", () => {
+  const st = n => ({ c429_10: n });
+  assert.deepEqual(A.shouldHibernate(st(39), { active: false }, {}, {}), { ok: false, reason: "below" });
+  assert.equal(A.shouldHibernate(st(40), { active: false }, {}, {}).ok, true);
+  assert.equal(A.shouldHibernate(st(158), { active: true }, {}, {}).reason, "active");
+  assert.equal(A.shouldHibernate(st(158), { active: false }, { draft: true }, {}).reason, "draft");
+  assert.equal(A.shouldHibernate(st(158), { active: false }, { generating: true }, {}).reason, "generating");
+  assert.equal(A.shouldHibernate(st(158), { active: false, audible: true }, {}, {}).reason, "audible");
+  assert.equal(A.shouldHibernate(st(158), { active: false }, {}, { hibernate: false }).reason, "off");
+  assert.equal(A.shouldHibernate(st(5), { active: false }, {}, { hibernate429: 5 }).ok, true);
+});

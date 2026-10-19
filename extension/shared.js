@@ -158,6 +158,17 @@
     return { ok: true, reason: null };
   }
 
+  // A tab that keeps getting 429s (a page-side retry loop) keeps the whole account blocked. Put it to sleep (discard):
+  // the tab stays in the strip with its title, nothing is lost unless it has a draft / a running answer.
+  // stats: { c429_10 } ; tab: { active, discarded, audible } ; state: { draft, generating }
+  function shouldHibernate(stats, tab, state, cfg) {
+    const c = Object.assign({ hibernate: true, hibernate429: 40 }, cfg || {});
+    if (c.hibernate === false) return { ok: false, reason: "off" };
+    if (!stats || (stats.c429_10 || 0) < c.hibernate429) return { ok: false, reason: "below" };
+    const v = canDiscard(state, { active: tab && tab.active, discarded: tab && tab.discarded, audible: tab && tab.audible });
+    return v.ok ? { ok: true, reason: null } : { ok: false, reason: v.reason };
+  }
+
   // ---- background (async) runs: verdict for ONE conversation (pure) ----
   // Observed on the real service: an async/agent run has async_status 3, stream_status COMPLETE (nothing is streamed to the
   // page) and an update_time that keeps moving (~1/min). The page then shows "Message delivery timed out" although the work
@@ -232,12 +243,12 @@
   // Is the limiter quiet enough that reviving a dead tab cannot hurt tabs that are working right now?
   // fams: [{id, cd, last429, starts:[ts]}] ; cfg.calmMs = required quiet time since the last 429.
   function isCalm(fams, now, cfg) {
-    const c = Object.assign({ calmMs: 30000 }, cfg || {});
+    const c = Object.assign({ calmMs: 30000, calmPer429Ms: 20000 }, cfg || {});
     for (const f of fams) {
       if (f.cd > now) return false;
       // the more 429s in the last 20 min, the longer the quiet period: poking a blocked account only prolongs the block
       const recent = (f.c429 || []).filter(t => now - t < 20 * 60000).length;
-      const quiet = Math.max(c.calmMs, Math.min(10 * 60000, recent * 20000));
+      const quiet = Math.max(c.calmMs, Math.min(10 * 60000, recent * c.calmPer429Ms));
       if (f.last429 && now - f.last429 < quiet) return false;
     }
     const hist = fams.filter(f => f.id === "detail" || f.id === "legacy")
@@ -266,7 +277,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    runVerdict,
+    runVerdict, shouldHibernate,
     GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,

@@ -26,6 +26,8 @@ const DEFAULT_CFG = {
   reaperRateBackoffMs: 30 * 60000, // after a 429 the audit sleeps this long
   autoStop: false,        // send stop_conversation for chats whose stream looks dead (OFF by default: stopping a live run destroys it)
   autoStopMin: 45,        // ... only after IS_STREAMING was observed this long AND the resume breaker tripped
+  hibernate: true,        // put a tab with a streak of 429s (page-side retry loop) to sleep: it blocks the whole account
+  hibernate429: 40,       // 429s within 10 minutes that make a tab 'looping'
   autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
   calmMs: 30000,          // required quiet time since the last 429 before a heal
   healGapMs: 15000,       // at least this long between two heals (any tabs)
@@ -486,9 +488,41 @@ async function healTab(id, manual) {
 }
 
 let healBusy = false;
+const HIB_NOTIFIED = {};
+async function hibernateTick() {
+  if (cfg.hibernate === false) return;
+  const now = Date.now();
+  for (const [sid, s] of Object.entries(T)) {
+    const id = Number(sid);
+    const stats = { c429_10: s.c429.length };
+    if (stats.c429_10 < cfg.hibernate429) continue;
+    let tab = null;
+    try { tab = await chrome.tabs.get(id); } catch {}
+    if (!tab || tab.discarded) continue;
+    const v = A.shouldHibernate(stats, tab, P[id], cfg);
+    if (v.ok) {
+      const r = await discardTabs([id], false);
+      if (r.discarded.includes(id)) {
+        const { hib = [] } = await chrome.storage.local.get("hib");
+        hib.unshift({ id, t: tab.title || tab.url, url: tab.url, at: now, n: stats.c429_10 });
+        await chrome.storage.local.set({ hib: hib.slice(0, 20) });
+        notifyLoop("a429-hib-" + id + "-" + now, "Вкладка усыплена: зациклилась", (tab.title || "вкладка") + " (" + stats.c429_10 + "×429 за 10 мин). Она осталась на месте, кликните по ней, чтобы загрузить.");
+      }
+    } else if (v.reason === "active" && now - (HIB_NOTIFIED[id] || 0) > 30 * 60000) {
+      HIB_NOTIFIED[id] = now;
+      notifyLoop("a429-loop-" + id + "-" + now, "Вкладка зациклилась и держит блокировку", (tab.title || "вкладка") + ": " + stats.c429_10 + "×429. Переключитесь на другую вкладку, и я её усыплю.");
+    }
+  }
+}
+function notifyLoop(nid, title, message) {
+  if (!chrome.notifications) return;
+  try { chrome.notifications.create(nid, { type: "basic", iconUrl: "icons/icon128.png", title, message, priority: 1 }); } catch {}
+}
+
 async function healTick() {
   reaperTick(false).catch(() => {});
   autoStopTick().catch(() => {});
+  hibernateTick().catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   healBusy = true;
   try {
@@ -687,7 +721,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "snapshot": {
         probeGuards(false).catch(() => {});
         const { sessions = [], restoreQueue = [] } = await chrome.storage.local.get(["sessions", "restoreQueue"]);
-        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary() }));
+        return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
       case "focus": {

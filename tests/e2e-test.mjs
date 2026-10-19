@@ -62,6 +62,7 @@ if(q.get('broken')) {
   };
   load();
 }
+if(q.get('hib')) (async()=>{ for(let i=0;i<200;i++){ await fetch('/backend-api/conversations/hib1').catch(()=>{}); await new Promise(r=>setTimeout(r,200)); } })();
 if(q.get('burst')) Promise.all(Array.from({length:10},(_,i)=>fetch('/backend-api/conversations/b'+i).then(r=>r.status))).then(s=>{document.title='burst '+s.join(',')});
 </script>`;
 let lim;
@@ -107,6 +108,7 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
     if (lim.brk <= 3) { res.statusCode = 429; res.setHeader("retry-after", "1"); return res.end('{"detail":"Too many requests"}'); }
     res.setHeader("content-type", "application/json"); return res.end('{"ok":true}');
   }
+  if (u.pathname === "/backend-api/conversations/hib1") { res.statusCode = 429; res.setHeader("retry-after", "1"); return res.end('{}'); }
   if (/^\/backend-api\/conversations\/[^/]+$/.test(u.pathname)) {
     if (limited("detail", MAX_DETAIL, now, res)) return;
     return setTimeout(() => { res.setHeader("content-type", "application/json"); res.setHeader("content-length", "20"); res.end('{"ok":true,"pad":"xx"}'); }, 30);
@@ -389,7 +391,7 @@ try {
 
   // 8) auto-heal: a visible tab whose history terminally failed (banner) is revived once the limiter is calm
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 3000, healGapMs: 2000, healBackoffScale: 0.05, autoHeal: true } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 3000, calmPer429Ms: 0, healGapMs: 2000, healBackoffScale: 0.05, autoHeal: true } });
   await call({ type: "resetLearned" });
   await ev(pop, "chrome.storage.local.set({ceilings:{detail:12,legacy:12,stream:12,list:12}})");
   await sleep(4000);
@@ -419,11 +421,11 @@ try {
   let stuckHealed = false;
   for (let i = 0; i < 60 && !stuckHealed; i++) { const t = await titleOf("stuck1"); stuckHealed = t && /^stuck healed/.test(t.t); if (!stuckHealed) await sleep(1000); }
   check("...and it is revived by clicking the page's own Try again", stuckHealed);
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healGapMs: 15000, healBackoffScale: 1 } });
 
   // 9) zombie stream: server says IS_STREAMING forever, resume is always 404 (observed on the real site)
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, healGapMs: 15000, healBackoffScale: 1 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healGapMs: 15000, healBackoffScale: 1 } });
   await sleep(1500);
   await resetMock();
   await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/zombie1?zombie=1', active:true}).then(t=>t.id)");
@@ -517,9 +519,30 @@ try {
   lim.listRate = false;
   await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 60 * 60000, reaperFastMs: 5 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
 
+  // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await ev(pop, "chrome.storage.local.remove(['reaper','hib'])");
+  await call({ type: "setCfg", patch: { hibernate: true, hibernate429: 3, reaper: false, autoHeal: false } });
+  await sleep(1500);
+  await resetMock();
+  const hibTab = await openTab("https://chatgpt.com/c/hibloop?hib=1");
+  let hs = null;
+  for (let i = 0; i < 40; i++) { const sn = await snap(); const row = Object.entries(sn.tabs).find(([, v]) => v.c429_10 >= 3); if (row) { hs = row; break; } await sleep(1000); }
+  check("hibernate: the looping tab accumulated a streak of 429s", !!hs, hs);
+  const other = await openTab("https://chatgpt.com/c/hib-other"); // takes the focus: the looping tab is no longer the active one
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>{const t=ts.find(x=>(x.url||x.pendingUrl||'').includes('hib-other')); return chrome.tabs.update(t.id,{active:true})})");
+  let slept = false, hl = [];
+  for (let i = 0; i < 25 && !slept; i++) { await sleep(1000); hl = await tabsList(); slept = !!(hl.find(t => t.url.includes("hibloop")) || {}).discarded; }
+  check("hibernate: the looping tab was put to sleep by itself (discarded, still in the strip)", slept, hl);
+  check("hibernate: the other tab was NOT touched", hl.some(t => t.url.includes("hib-other") && !t.discarded), hl);
+  const hsnap = await snap();
+  check("hibernate: the panel remembers which tab it was", Array.isArray(hsnap.hib) && hsnap.hib.some(h => /hibloop/.test(h.url)), hsnap.hib);
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { hibernate429: 40, reaper: true, autoHeal: true } });
+
   // 15) background (async) runs: shown as working, a zombie with the same async_status is NOT a run, completion is reported
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 3000, reaperConfirmMs: 600000, reaperEveryMs: 4000, reaperFastMs: 4000, runsEveryMs: 4000, runStaleMs: 600000, reaperPaceMs: 300, calmMs: 1000, notifyRuns: true } });
+  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 3000, reaperConfirmMs: 600000, reaperEveryMs: 4000, reaperFastMs: 4000, runsEveryMs: 4000, runStaleMs: 600000, reaperPaceMs: 300, calmMs: 1000, calmPer429Ms: 0, notifyRuns: true } });
   await ev(pop, "chrome.storage.local.remove('reaper')");   // forget the 429 back-off of scenario 14
   await sleep(1500);
   await resetMock();
@@ -541,9 +564,10 @@ try {
   let doneSnap = null;
   for (let i = 0; i < 50; i++) { doneSnap = (await snap()).reaper; if (doneSnap && doneSnap.done.some(x => x.id.endsWith("b001"))) break; await sleep(1000); }
   check("runs: the finished run moves to 'done' with its title", doneSnap && doneSnap.done.some(x => x.id.endsWith("b001") && x.t === "async run A"), doneSnap && doneSnap.done);
-  const notifs = await ev(pop, "new Promise(r => chrome.notifications.getAll(r)).then(o => Object.keys(o || {}))");
+  let notifs = [];
+  for (let i = 0; i < 10; i++) { notifs = await ev(pop, "new Promise(r => chrome.notifications.getAll(r)).then(o => Object.keys(o || {}))"); if (notifs.some(k => k.indexOf("a429-run-") === 0 && k.indexOf("b001") > 0)) break; await sleep(800); }
   check("runs: a desktop notification was raised for the finished run", notifs.some(k => k.indexOf("a429-run-") === 0 && k.indexOf("b001") > 0), notifs);
-  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 15 * 60000, reaperFastMs: 5 * 60000, runsEveryMs: 2 * 60000, runStaleMs: 15 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
+  await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 15 * 60000, reaperFastMs: 5 * 60000, runsEveryMs: 2 * 60000, runStaleMs: 15 * 60000, reaperPaceMs: 2000, calmMs: 30000, calmPer429Ms: 20000 } });
 
   const shot = await pop.send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(path.join(outDir, "e2e-popup.png"), Buffer.from(shot.data, "base64"));

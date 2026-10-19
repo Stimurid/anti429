@@ -75,8 +75,10 @@ function renderTabs() {
       el("span", { text: `${s.mb10} МБ/10м` }),
       s.c429_10 ? el("span", { text: `429×${s.c429_10}` }) : null,
       ...chips);
+    if (s.loop || s.c429_10 >= (snap.cfg.hibernate429 || 40)) { if (t.active && s.c429_10 >= (snap.cfg.hibernate429 || 40)) chips.push(el("span", { class: "chip warn", text: "💤 усну, как только уйдёте с неё", title: "Вкладка зациклилась (много 429). Она активна в каком-то окне Chrome; как только вы переключитесь на другую вкладку, расширение её усыпит." })); }
     const canDiscard = !t.active && !t.discarded;
     const b = el("div", { class: "b" },
+      el("button", { class: "small ghost", text: "Показать", title: "Перейти к этой вкладке (в её окне)", onclick: () => send({ type: "focus", id: t.id }) }),
       el("button", { class: "small", text: "Сбросить", disabled: canDiscard ? null : "", title: "Выгрузить содержимое, вкладка останется",
         onclick: async () => {
           const risky = s.draft || s.generating;
@@ -113,6 +115,18 @@ async function openChat(id, g) {
   const t = tabs.find(x => String(x.url).includes("/c/" + id));
   if (t) await send({ type: "focus", id: t.id });
   else chrome.tabs.create({ url: "https://chatgpt.com/" + (g ? "g/" + g + "/" : "") + "c/" + id });
+}
+
+function renderHib() {
+  const box = $("hibBox"), list = snap.hib || [];
+  $("hibSec").hidden = !list.length;
+  box.replaceChildren();
+  for (const h of list.slice(0, 6)) {
+    const ago = Math.round((Date.now() - h.at) / 60000);
+    box.append(el("div", { class: "sess" },
+      el("span", { text: `💤 ${h.t} · ${ago} мин назад · ${h.n}×429`, title: h.url }),
+      el("button", { class: "small ghost", text: "Показать", onclick: () => send({ type: "focus", id: h.id }) })));
+  }
 }
 
 function renderRuns() {
@@ -188,7 +202,7 @@ async function refresh() {
     snap = await send({ type: "snapshot" });
     tabsNow = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
     if (!snap || snap.error) return;
-    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderRuns(); renderReaper();
+    renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderHib(); renderRuns(); renderReaper();
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
     $("btnProtect").hidden = unprotected === 0;
     $("btnProtect").textContent = `Защитить открытые вкладки (${unprotected})`;
