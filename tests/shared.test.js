@@ -268,3 +268,11 @@ test("pickMemoryVictim: only above the threshold, longest-idle safe background t
   assert.equal(A.pickMemoryVictim(90, tabs, { memDiscardPct: 85 }), 7);
   assert.equal(A.pickMemoryVictim(99, [t(1, 1, { draft: true })], {}), null);
 });
+
+test("healBudgetOk: at most 4 automatic heals per 20 minutes for one tab", () => {
+  const now = 100 * 3600000, m = 60000;
+  assert.equal(A.healBudgetOk([], now, 4, 20 * m), true);
+  assert.equal(A.healBudgetOk([now - 5 * m, now - 4 * m, now - 3 * m], now, 4, 20 * m), true);
+  assert.equal(A.healBudgetOk([now - 5 * m, now - 4 * m, now - 3 * m, now - m], now, 4, 20 * m), false);
+  assert.equal(A.healBudgetOk([now - 50 * m, now - 40 * m, now - 30 * m, now - 25 * m], now, 4, 20 * m), true, "old heals expire");
+});

@@ -158,6 +158,13 @@
     return { ok: true, reason: null };
   }
 
+  // Heal budget per tab, independent of the tab's banner state (which flips as the page retries on its own):
+  // at most `max` automatic heals per `windowMs`, otherwise a tab whose Try-again does not help is poked forever.
+  function healBudgetOk(times, now, max, windowMs) {
+    const recent = (times || []).filter(t => now - t < (windowMs || 20 * 60000));
+    return recent.length < (max || 4);
+  }
+
   // A tab that keeps getting 429s (a page-side retry loop) keeps the whole account blocked. Put it to sleep (discard):
   // the tab stays in the strip with its title, nothing is lost unless it has a draft / a running answer.
   // stats: { c429_10 } ; tab: { active, discarded, audible } ; state: { draft, generating }
@@ -289,7 +296,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    runVerdict, shouldHibernate,
+    runVerdict, shouldHibernate, healBudgetOk,
     GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,

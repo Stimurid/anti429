@@ -90,6 +90,9 @@ const ready = (async () => {
 
 // ---------- journal: what actually happened, kept across restarts (so an incident can be explained afterwards) ----------
 let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
+let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
+const HB = {};    // tabId -> timestamps of automatic heals (the budget)
+const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").slice(0, 70);
 const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
 function jr(e, data) {
   JR.push(Object.assign({ t: Date.now(), e }, data || {}));
@@ -106,14 +109,15 @@ async function journalTick(now) {
   for (const id of A.FAMILY_IDS) { const n = A.countIn(F[id].starts, now, 60000); if (n) fam[id] = n; }
   const top = Object.entries(T).map(([id, s]) => [id, s.req.length, s.c429.length]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const held = Object.values(H).reduce((a, n) => a + (n || 0), 0);
-  if (!Object.keys(fam).length && !LOADS && !held) return;
+  if (!Object.keys(fam).length && !LOADS && !held && !Object.keys(OTHER).length) return;
   const topT = [];
   for (const [id, req, c] of top) {
     let t = ""; try { t = ((await chrome.tabs.get(Number(id))).title || "").slice(0, 28); } catch {}
     topT.push({ tab: Number(id), req, c429: c, t });
   }
-  jr("min", { fam, loads: LOADS, held, top: topT });
-  LOADS = 0;
+  const other = Object.entries(OTHER).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  jr("min", { fam, loads: LOADS, held, top: topT, other });
+  LOADS = 0; OTHER = {};
 }
 
 function persistSoon() {
@@ -160,6 +164,7 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
     if (fam) (s.fam[fam] || (s.fam[fam] = [])).push(now);
   }
   if (fam) F[fam].starts.push(now);
+  else if (!reaperAuditing) { const k = details.method + " " + normPath(u.pathname); OTHER[k] = (OTHER[k] || 0) + 1; }
   persistSoon();
   scheduleRender();
 }, { urls: URLS });
@@ -511,7 +516,7 @@ async function healTab(id, manual) {
   const b = B[id] || (B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() });
   b.heals = (b.heals || 0) + 1;
   b.lastHealAt = Date.now();
-  if (!manual) lastHealAny = Date.now();
+  if (!manual) { lastHealAny = Date.now(); (HB[id] = (HB[id] || []).filter(t => Date.now() - t < 20 * 60000)).push(Date.now()); }
   let res = null;
   jr("heal", { tab: id, manual: !!manual, n: b.heals });
   try { res = await chrome.tabs.sendMessage(id, { type: "a429_heal" }); } catch {}
@@ -585,6 +590,7 @@ async function healTick() {
       let tab = null;
       try { tab = await chrome.tabs.get(id); } catch {}
       if (!tab || tab.discarded) { delete B[sid]; continue; }
+      if (!A.healBudgetOk(HB[id], now, 4, 20 * 60000)) continue; // already poked 4 times in 20 min: leave it alone
       cands.push({ id, active: !!tab.active, failedAt: b.failedAt, heals: b.heals || 0, lastHealAt: b.lastHealAt || 0 });
     }
     if (!cands.length) return;

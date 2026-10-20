@@ -122,7 +122,7 @@ function renderJournal() {
   const hh = t => new Date(t).toTimeString().slice(0, 8);
   const line = e => {
     if (e.e === "429") return `${hh(e.t)} 429 ${e.fam} вкладка ${e.tab} · принято до отказа ${e.acc} · retry-after ${e.ra == null ? "?" : e.ra + "с"} · 429 за 10 мин: ${e.n10}`;
-    if (e.e === "min") return `${hh(e.t)} за минуту: ${Object.entries(e.fam).map(([k, v]) => k + " " + v).join(", ") || "запросов нет"} · загрузок вкладок ${e.loads} · держу ${e.held}` + (e.top.length ? " · больше всего: " + e.top.map(x => `«${x.t}» ${x.req}`).join("; ") : "");
+    if (e.e === "min") return `${hh(e.t)} за минуту: ${Object.entries(e.fam).map(([k, v]) => k + " " + v).join(", ") || "запросов нет"} · загрузок вкладок ${e.loads} · держу ${e.held}` + (e.top.length ? " · больше всего: " + e.top.map(x => `«${x.t}» ${x.req}`).join("; ") : "") + (e.other && e.other.length ? " · прочий трафик: " + e.other.map(x => `${x[0]} ×${x[1]}`).join("; ") : "");
     if (e.e === "chrome-start") return `${hh(e.t)} ЗАПУСК Chrome: вкладок ChatGPT ${e.tabs}, спящих ${e.discarded}`;
     if (e.e === "installed") return `${hh(e.t)} расширение (пере)установлено, вкладок ${e.tabs}`;
     if (e.e === "hib") return `${hh(e.t)} вкладка ${e.tab} усыплена (${e.n}×429)`;
