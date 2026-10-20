@@ -255,3 +255,16 @@ test("shouldHibernate: only a streak of 429s, and never an active / draft / gene
   assert.equal(A.shouldHibernate(st(158), { active: false }, {}, { hibernate: false }).reason, "off");
   assert.equal(A.shouldHibernate(st(5), { active: false }, {}, { hibernate429: 5 }).ok, true);
 });
+
+test("pickMemoryVictim: only above the threshold, longest-idle safe background tab, never draft / generating / audible / active / unknown", () => {
+  const t = (id, lastAccessed, state, extra) => Object.assign({ id, lastAccessed, state, active: false, discarded: false, audible: false }, extra || {});
+  const tabs = [
+    t(1, 100, { draft: true }), t(2, 200, { generating: true }), t(3, 300, {}, { audible: true }),
+    t(4, 400, {}, { active: true }), t(5, 500, undefined), t(6, 700, {}), t(7, 600, {}), t(8, 50, {}, { discarded: true })
+  ];
+  assert.equal(A.pickMemoryVictim(92.9, tabs, {}), null);
+  assert.equal(A.pickMemoryVictim(93, tabs, {}), 7);
+  assert.equal(A.pickMemoryVictim(97, tabs, { memDiscard: false }), null);
+  assert.equal(A.pickMemoryVictim(90, tabs, { memDiscardPct: 85 }), 7);
+  assert.equal(A.pickMemoryVictim(99, [t(1, 1, { draft: true })], {}), null);
+});

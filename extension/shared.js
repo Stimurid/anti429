@@ -273,6 +273,18 @@
     return ok.length ? ok[0].id : null;
   }
 
+  // Memory pressure: which background tab should be discarded next (pure)?
+  // used = physical memory in use, 0..100. tabs: [{ id, active, discarded, audible, lastAccessed, state }], state = { draft, generating }
+  // as reported by the page bridge. A tab whose state is unknown is skipped: without it we cannot know about a draft.
+  // Returns the tab id that was idle the longest, or null (below the threshold / nothing safe to discard).
+  function pickMemoryVictim(used, tabs, cfg) {
+    const c = Object.assign({ memDiscard: true, memDiscardPct: 93 }, cfg || {});
+    if (c.memDiscard === false || !(used >= c.memDiscardPct)) return null;
+    const ok = (tabs || []).filter(t => t.state && canDiscard(t.state, { active: t.active, discarded: t.discarded, audible: t.audible }).ok);
+    ok.sort((a, b) => (a.lastAccessed || 0) - (b.lastAccessed || 0));
+    return ok.length ? ok[0].id : null;
+  }
+
   // Only transient failures are worth retrying (not 404 = deleted conversation, not 403 = no access).
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
@@ -282,7 +294,7 @@
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,
     versionGreater, isCalm, pickHealTarget, isHealableStatus, HEAL_BACKOFF_MS,
-    canDiscard,
+    canDiscard, pickMemoryVictim,
     FAMILIES, FAMILY_IDS, WINDOW_MS, DEFAULT_CEIL, MAX_CEIL, CEIL_MIN, PACE_FRACTION,
     RELAX_AFTER_MS, BACKOFFS_MS, HOLD_MAX_MS, TERMINAL_COOLDOWN_MS, RETRY_AFTER_CAP_MS,
     classify, isGuardable, parseRetryAfter, retryBackoffMs, jitter, countIn, capFor,

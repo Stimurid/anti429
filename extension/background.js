@@ -28,6 +28,9 @@ const DEFAULT_CFG = {
   autoStopMin: 45,        // ... only after IS_STREAMING was observed this long AND the resume breaker tripped
   hibernate: true,        // put a tab with a streak of 429s (page-side retry loop) to sleep: it blocks the whole account
   hibernate429: 40,       // 429s within 10 minutes that make a tab 'looping'
+  memDiscard: true,       // under memory pressure, discard idle background chatgpt tabs (never active / draft / generating / audible)
+  memDiscardPct: 93,      // physical memory used, % — at or above this one tab is discarded per check
+  memDiscardGapMs: 6000,  // pause after a discard so the freed memory shows up before the next one
   autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
   calmMs: 30000,          // required quiet time since the last 429 before a heal
   healGapMs: 15000,       // at least this long between two heals (any tabs)
@@ -545,6 +548,22 @@ async function hibernateTick() {
     }
   }
 }
+// Memory pressure: below the OS-level watchdog's kill threshold, quietly put the longest-idle background tab to sleep.
+let lastMemDiscard = 0;
+async function memoryTick() {
+  if (cfg.memDiscard === false || !chrome.system || !chrome.system.memory) return;
+  const now = Date.now();
+  if (now - lastMemDiscard < cfg.memDiscardGapMs) return;
+  const m = await chrome.system.memory.getInfo();
+  const used = 100 * (1 - m.availableCapacity / m.capacity);
+  if (used < cfg.memDiscardPct) return;
+  const tabs = (await chatTabs()).map(t => ({ id: t.id, active: t.active, discarded: t.discarded, audible: t.audible, lastAccessed: t.lastAccessed, state: P[t.id] }));
+  const id = A.pickMemoryVictim(used, tabs, cfg);
+  if (id == null) return;
+  lastMemDiscard = now;
+  const r = await discardTabs([id], false);
+  if (r.discarded.includes(id)) jr("mem-discard", { tab: id, used: Math.round(used * 10) / 10 });
+}
 function notifyLoop(nid, title, message) {
   if (!chrome.notifications) return;
   try { chrome.notifications.create(nid, { type: "basic", iconUrl: "icons/icon128.png", title, message, priority: 1 }); } catch {}
@@ -554,6 +573,7 @@ async function healTick() {
   reaperTick(false).catch(() => {});
   autoStopTick().catch(() => {});
   hibernateTick().catch(() => {});
+  memoryTick().catch(() => {});
   journalTick(Date.now()).catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   healBusy = true;
