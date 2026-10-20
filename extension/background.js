@@ -35,7 +35,8 @@ const DEFAULT_CFG = {
   calmMs: 30000,          // required quiet time since the last 429 before a heal
   healGapMs: 15000,       // at least this long between two heals (any tabs)
   healBackoffScale: 1,    // multiplies the per-tab retry spacing (test hook)
-  healPauseScale: 1       // multiplies the global pause after a failed heal (test hook)
+  healPauseScale: 1,      // multiplies the global pause after a failed heal (test hook)
+  notifyStorm: true       // desktop notification when 3+ ChatGPT tabs are opened within 3 minutes
 };
 
 const URLS = ["https://chatgpt.com/backend-api/*"];
@@ -246,7 +247,7 @@ chrome.tabs.onCreated.addListener(tab => {
   if (CREATED.length >= 3 && now - lastStormNote > 10 * 60000) {
     lastStormNote = now;
     jr("tab-storm", { n: CREATED.length });
-    notifyLoop("a429-storm-" + now, "Кто-то массово открывает вкладки ChatGPT", CREATED.length + " новых вкладки за 3 минуты. Это не вы? Смотрите «Журнал событий» в панели 4̅2̅9̅: там видно окно, группу и фокус каждой.");
+    if (cfg.notifyStorm !== false) notifyLoop("a429-storm-" + now, "Кто-то массово открывает вкладки ChatGPT", CREATED.length + " новых вкладки за 3 минуты. Это не вы? Смотрите «Журнал событий» в панели 4̅2̅9̅: там видно окно, группу и фокус каждой.");
   }
 });
 

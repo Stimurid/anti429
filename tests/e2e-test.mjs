@@ -198,7 +198,7 @@ try {
   await dbg(`/json/close/${preTab.id}`);
 
   // 1) learning: guard OFF, burst of 10 against a limiter that allows only 3 per 3 s (assumed ceiling is 4)
-  await call({ type: "setCfg", patch: { enabled: false } });
+  await call({ type: "setCfg", patch: { enabled: false, notifyStorm: false } });
   const warm = await openTab("https://chatgpt.com/c/warm"); // bridge mirrors cfg into the origin's localStorage on load
   await sleep(2000);
   await dbg(`/json/close/${warm.id}`);
