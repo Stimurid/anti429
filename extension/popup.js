@@ -125,6 +125,9 @@ function renderJournal() {
     if (e.e === "min") return `${hh(e.t)} за минуту: ${Object.entries(e.fam).map(([k, v]) => k + " " + v).join(", ") || "запросов нет"} · загрузок вкладок ${e.loads} · держу ${e.held}` + (e.top.length ? " · больше всего: " + e.top.map(x => `«${x.t}» ${x.req}`).join("; ") : "") + (e.other && e.other.length ? " · прочий трафик: " + e.other.map(x => `${x[0]} ×${x[1]}`).join("; ") : "");
     if (e.e === "chrome-start") return `${hh(e.t)} ЗАПУСК Chrome: вкладок ChatGPT ${e.tabs}, спящих ${e.discarded}`;
     if (e.e === "installed") return `${hh(e.t)} расширение (пере)установлено, вкладок ${e.tabs}`;
+    if (e.e === "tab-new") return `${hh(e.t)} НОВАЯ вкладка ${e.tab} · окно ${e.win} · группа ${e.grp} · ${e.opener ? "открыта со страницы вкладки " + e.opener : "открыта программно, без родителя"}${e.active ? " · забрала фокус" : ""} · ${e.u}`;
+    if (e.e === "tab-storm") return `${hh(e.t)} ШТОРМ вкладок: ${e.n} новых за 3 мин`;
+    if (e.e === "heal-pause") return `${hh(e.t)} оживление дало ещё одну 429 (подряд: ${e.streak}): пауза всех оживлений ${e.min} мин`;
     if (e.e === "hib") return `${hh(e.t)} вкладка ${e.tab} усыплена (${e.n}×429)`;
     if (e.e === "heal") return `${hh(e.t)} оживляю вкладку ${e.tab}${e.manual ? " (вручную)" : ""}, попытка ${e.n}`;
     return `${hh(e.t)} ${e.e}`;

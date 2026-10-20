@@ -276,3 +276,9 @@ test("healBudgetOk: at most 4 automatic heals per 20 minutes for one tab", () =>
   assert.equal(A.healBudgetOk([now - 5 * m, now - 4 * m, now - 3 * m, now - m], now, 4, 20 * m), false);
   assert.equal(A.healBudgetOk([now - 50 * m, now - 40 * m, now - 30 * m, now - 25 * m], now, 4, 20 * m), true, "old heals expire");
 });
+
+test("healPauseMs: escalating global pause after consecutive failed heals, capped at 30 min", () => {
+  assert.equal(A.healPauseMs(0), 0);
+  assert.deepEqual([1, 2, 3, 4, 5].map(A.healPauseMs), [120000, 240000, 480000, 900000, 1800000]);
+  assert.equal(A.healPauseMs(99), 1800000);
+});

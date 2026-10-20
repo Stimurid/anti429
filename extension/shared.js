@@ -158,6 +158,11 @@
     return { ok: true, reason: null };
   }
 
+  // After a heal that was answered with another 429 the server needs real silence: Retry-After alone is not enough
+  // (it is understated and the penalty accumulates). Pause all automatic heals, doubling per consecutive failure.
+  const HEAL_PAUSE_MS = [0, 120000, 240000, 480000, 900000, 1800000];
+  function healPauseMs(streak) { return HEAL_PAUSE_MS[Math.max(0, Math.min(HEAL_PAUSE_MS.length - 1, streak | 0))]; }
+
   // Heal budget per tab, independent of the tab's banner state (which flips as the page retries on its own):
   // at most `max` automatic heals per `windowMs`, otherwise a tab whose Try-again does not help is poked forever.
   function healBudgetOk(times, now, max, windowMs) {
@@ -296,7 +301,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    runVerdict, shouldHibernate, healBudgetOk,
+    runVerdict, shouldHibernate, healBudgetOk, healPauseMs,
     GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,

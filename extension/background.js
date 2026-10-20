@@ -34,7 +34,8 @@ const DEFAULT_CFG = {
   autoHeal: true,         // revive tabs stuck on "Could not load this conversation" when the limiter is calm
   calmMs: 30000,          // required quiet time since the last 429 before a heal
   healGapMs: 15000,       // at least this long between two heals (any tabs)
-  healBackoffScale: 1     // multiplies the per-tab retry spacing (test hook)
+  healBackoffScale: 1,    // multiplies the per-tab retry spacing (test hook)
+  healPauseScale: 1       // multiplies the global pause after a failed heal (test hook)
 };
 
 const URLS = ["https://chatgpt.com/backend-api/*"];
@@ -92,6 +93,7 @@ const ready = (async () => {
 let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
 let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
 const HB = {};    // tabId -> timestamps of automatic heals (the budget)
+const HF = { streak: 0, until: 0, last: 0 }; // consecutive heals answered by another 429 -> escalating global pause
 const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").slice(0, 70);
 const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
 function jr(e, data) {
@@ -216,6 +218,11 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   f.learned = true;
   f.last429 = now;
   f.c429.push(now);
+  if (lastHealAny && now - lastHealAny < 120000 && now - HF.last > 20000) {
+    HF.last = now; HF.streak++;
+    HF.until = now + A.healPauseMs(HF.streak) * (cfg.healPauseScale == null ? 1 : cfg.healPauseScale);
+    jr("heal-pause", { streak: HF.streak, min: Math.round(A.healPauseMs(HF.streak) / 60000) });
+  }
   jr("429", { fam, tab: details.tabId, ra: ra ? Math.round(ra / 1000) : null, acc: observed, n10: f.c429.length, tabReq60: details.tabId >= 0 ? A.countIn(tabStats(details.tabId).req, now, 60000) : null });
   f.cd = Math.max(f.cd, now + (ra || 15000));
   if (details.tabId >= 0) tabStats(details.tabId).c429.push(now);
@@ -223,6 +230,25 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   persistSoon();
   scheduleRender();
 }, { urls: URLS }, ["responseHeaders"]);
+
+// who opens ChatGPT tabs? Log every new one (parent, group, window, focus) and warn about a storm of them.
+const CREATED = [];
+let lastStormNote = 0;
+chrome.tabs.onCreated.addListener(tab => {
+  const url = tab.pendingUrl || tab.url || "";
+  if (!url.startsWith("https://chatgpt.com/")) return;
+  const now = Date.now();
+  let path = "";
+  try { path = normPath(new URL(url).pathname); } catch {}
+  jr("tab-new", { tab: tab.id, win: tab.windowId, grp: tab.groupId, opener: tab.openerTabId || null, active: !!tab.active, u: path });
+  CREATED.push(now);
+  while (CREATED.length && now - CREATED[0] > 3 * 60000) CREATED.shift();
+  if (CREATED.length >= 3 && now - lastStormNote > 10 * 60000) {
+    lastStormNote = now;
+    jr("tab-storm", { n: CREATED.length });
+    notifyLoop("a429-storm-" + now, "Кто-то массово открывает вкладки ChatGPT", CREATED.length + " новых вкладки за 3 минуты. Это не вы? Смотрите «Журнал событий» в панели 4̅2̅9̅: там видно окно, группу и фокус каждой.");
+  }
+});
 
 chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; delete STOP[id]; persistSoon(); });
 chrome.tabs.onUpdated.addListener((id, info, tab) => { if (info.status === "loading") { if (tab && String(tab.url || "").startsWith("https://chatgpt.com/")) LOADS++; delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
@@ -581,6 +607,8 @@ async function healTick() {
   memoryTick().catch(() => {});
   journalTick(Date.now()).catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
+  if (Date.now() < HF.until) return; // paused after a heal that got another 429
+  if (HF.streak && Date.now() - HF.last > 30 * 60000) HF.streak = 0;
   healBusy = true;
   try {
     const now = Date.now();
@@ -710,7 +738,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           else if (msg.ev.type === "resume-recovery-success") R[id] = (R[id] || 0) + 1;
           else if (msg.ev.type === "history-failed") {
             if (A.isHealableStatus(msg.ev.status)) B[id] = Object.assign({ heals: 0, lastHealAt: 0 }, B[id], { failedAt: Date.now(), status: msg.ev.status });
-          } else if (msg.ev.type === "history-ok") delete B[id];
+          } else if (msg.ev.type === "history-ok") { delete B[id]; HF.streak = 0; HF.until = 0; }
           else if (msg.ev.type === "dead-stream") D[id] = Date.now();
           else if (msg.ev.type === "stream-status") {
             const st = msg.ev.status;

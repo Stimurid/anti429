@@ -214,6 +214,7 @@ try {
   const badge = await ev(pop, "chrome.action.getBadgeText({})");
   check("badge shows seconds of block (e.g. '7s')", /^\d+s$/.test(badge), { badge });
   check("journal: the 429s are recorded with family, tab and accepted count", Array.isArray(s.journal) && s.journal.some(e => e.e === "429" && e.fam && e.tab != null && e.acc != null), (s.journal || []).slice(-3));
+  check("journal: new ChatGPT tabs are logged (who opens tabs)", Array.isArray(s.journal) && s.journal.some(e => e.e === "tab-new" && e.tab != null && e.win != null), (s.journal || []).filter(e => e.e === "tab-new").slice(-2));
   const learnedCeil = det.ceil;
   await dbg(`/json/close/${bt.id}`); // close the burst tab
 
@@ -392,7 +393,7 @@ try {
 
   // 8) auto-heal: a visible tab whose history terminally failed (banner) is revived once the limiter is calm
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 3000, calmPer429Ms: 0, healGapMs: 2000, healBackoffScale: 0.05, autoHeal: true } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 3000, calmPer429Ms: 0, healPauseScale: 0, healGapMs: 2000, healBackoffScale: 0.05, autoHeal: true } });
   await call({ type: "resetLearned" });
   await ev(pop, "chrome.storage.local.set({ceilings:{detail:12,legacy:12,stream:12,list:12}})");
   await sleep(4000);
@@ -422,11 +423,11 @@ try {
   let stuckHealed = false;
   for (let i = 0; i < 60 && !stuckHealed; i++) { const t = await titleOf("stuck1"); stuckHealed = t && /^stuck healed/.test(t.t); if (!stuckHealed) await sleep(1000); }
   check("...and it is revived by clicking the page's own Try again", stuckHealed);
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healGapMs: 15000, healBackoffScale: 1 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1 } });
 
   // 9) zombie stream: server says IS_STREAMING forever, resume is always 404 (observed on the real site)
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healGapMs: 15000, healBackoffScale: 1 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1 } });
   await sleep(1500);
   await resetMock();
   await ev(pop, "chrome.tabs.create({url:'https://chatgpt.com/c/zombie1?zombie=1', active:true}).then(t=>t.id)");
