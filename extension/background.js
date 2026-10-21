@@ -95,7 +95,7 @@ let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
 let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
 const HB = {};    // tabId -> timestamps of automatic heals (the budget)
 const HF = { streak: 0, until: 0, last: 0 }; // consecutive heals answered by another 429 -> escalating global pause
-const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").slice(0, 70);
+const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").replace(/[0-9a-f]{16,}/g, "<hex>").slice(0, 70);
 const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
 function jr(e, data) {
   JR.push(Object.assign({ t: Date.now(), e }, data || {}));
@@ -167,7 +167,11 @@ chrome.webRequest.onBeforeRequest.addListener(details => {
     if (fam) (s.fam[fam] || (s.fam[fam] = [])).push(now);
   }
   if (fam) F[fam].starts.push(now);
-  else if (!reaperAuditing) { const k = details.method + " " + normPath(u.pathname); OTHER[k] = (OTHER[k] || 0) + 1; }
+  else if (!reaperAuditing) {
+    const who = details.tabId >= 0 ? "tab" + details.tabId : (details.initiator || "?").replace("chrome-extension://", "ext:").slice(0, 16);
+    const k = details.method + " " + normPath(u.pathname) + " [" + who + "]";
+    OTHER[k] = (OTHER[k] || 0) + 1;
+  }
   persistSoon();
   scheduleRender();
 }, { urls: URLS });
