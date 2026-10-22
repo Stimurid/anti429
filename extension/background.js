@@ -1,7 +1,7 @@
 // 4̅2̅9̅ (Anti-429) service worker.
 // Observes every /backend-api request via webRequest (read-only), meters the four limiter families,
 // learns lower ceilings from real 429s, drives the badge/icon traffic light and serves the popup.
-importScripts("shared.js");
+importScripts("shared.js", "health_bridge.js");
 const A = self.A429;
 
 const DEFAULT_CFG = {
@@ -409,7 +409,9 @@ async function reaperTick(force) {
     const R = await reaperState();
     if (R.lastError === "no-bridge") await ensureBridges();
     const suspects = Object.keys(R.obs).filter(id => R.obs[id].status === "IS_STREAMING");
-    const every = suspects.length ? cfg.reaperFastMs : (Object.keys(R.runs).length ? cfg.runsEveryMs : cfg.reaperEveryMs);
+    const watchRow=await chrome.storage.local.get("hydra.health.watches.v1");
+    const watchIds=Object.entries(watchRow["hydra.health.watches.v1"]||{}).filter(([,t])=>now-t<10*60000).map(([id])=>id).sort((a,b)=>(R.health?.[a]?.stream_observed_at_ms||0)-(R.health?.[b]?.stream_observed_at_ms||0)).slice(0,32);
+    const every = watchIds.length ? Math.min(cfg.runsEveryMs,120000) : suspects.length ? cfg.reaperFastMs : (Object.keys(R.runs).length ? cfg.runsEveryMs : cfg.reaperEveryMs);
     if (!force && now - R.lastAudit < every) return { skipped: true };
     // Never add load while the limiter is busy: no cooldown, no recent 429, nobody loading history right now.
     if (!force && !calmNow(now)) return { notCalm: true };
@@ -423,7 +425,7 @@ async function reaperTick(force) {
     reaperAuditing = true; // the audit's own requests are not the user's load: keep them out of the meters/learning
     try {
       scan = await chrome.tabs.sendMessage(tab.id, { type: "a429_scan", params: {
-        idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: Object.keys(R.obs),
+        idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: [...new Set([...watchIds,...Object.keys(R.obs)])],
         paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus, maxList: deep ? 224 : 56, projectPages: deep ? 6 : 1,
         skip: Object.fromEntries(Object.entries(R.chk).filter(([, v]) => v.st === "COMPLETE").map(([k, v]) => [k, v.u])),
         projectIds: [...new Set(tabs.map(t => (String(t.url).split("/g/")[1] || "").split("/")[0]).filter(Boolean))]
@@ -434,6 +436,7 @@ async function reaperTick(force) {
     if (scan && scan.ok) { R.lastReqs = scan.requests || 0; R.lastMs = scan.ms || 0; if (deep && !scan.rate) R.lastDeep = now; }
     if (!scan || !scan.ok) { R.lastError = (scan && scan.reason) || "no-bridge"; await chrome.storage.local.set({ reaper: R }); return { error: R.lastError }; }
     R.lastError = null;
+    R.health=self.A429Health.observe(R.health||{},scan,Date.now());
     if (scan.rate) { R.lastRate = now; R.lastAudit = now - every + cfg.reaperRateBackoffMs; } // 429: back off for a long time
 
     const day = new Date(now).toISOString().slice(0, 10);
@@ -449,7 +452,8 @@ async function reaperTick(force) {
         { idleMs: cfg.reaperIdleMs, confirmMs: cfg.reaperConfirmMs });
       if (v.rec) R.obs[it.id] = Object.assign({}, v.rec, { t: it.t });
       else delete R.obs[it.id];
-      if (v.action === "stop" && R.stopsDay.n < cfg.reaperMaxStopsPerDay) {
+      // A HYDRA observation lease never grants destructive recovery.
+      if (v.action === "stop" && !watchIds.includes(it.id) && R.stopsDay.n < cfg.reaperMaxStopsPerDay) {
         let r = null;
         try { r = await chrome.tabs.sendMessage(tab.id, { type: "a429_stop", conv: it.id }); } catch {}
         R.stopsDay.n++;
@@ -905,4 +909,21 @@ chrome.windows.onBoundsChanged.addListener(win => {
 chrome.windows.onRemoved.addListener(async id => {
   const { dashWin } = await chrome.storage.local.get("dashWin");
   if (id === dashWin) chrome.storage.local.remove("dashWin");
+});
+
+// HYDRA requests cached evidence only. It cannot make this API Send, Retry,
+// Stop, enumerate history or force an account scan past the existing governor.
+if(chrome.runtime.onMessageExternal)chrome.runtime.onMessageExternal.addListener((msg,sender,reply)=>{
+ if(sender.id!=="opgnfgihbjphabgflgnaiamenmdgfjom" || sender.tab ||
+    msg?.type!=="hydra.health.read" || !self.A429Health.validId(msg.conversationId)){
+   reply({ok:false,error:"HEALTH_READ_SCOPE_REQUIRED"});return false;
+ }
+ (async()=>{await ready;
+   if(msg.watch===true){const k="hydra.health.watches.v1",now=Date.now(),row=await chrome.storage.local.get(k);
+     const map=Object.fromEntries(Object.entries(row[k]||{}).filter(([,t])=>now-t<10*60000));
+     if(Object.keys(map).length<32||map[msg.conversationId]){map[msg.conversationId]=now;await chrome.storage.local.set({[k]:map});}
+   }
+   return Object.assign(self.A429Health.snapshot(msg.conversationId,await reaperState(),cfg,F),
+     {observer_version:chrome.runtime.getManifest().version});
+ })().then(reply,()=>reply({ok:false,error:"HEALTH_CACHE_UNAVAILABLE"}));return true;
 });

@@ -154,7 +154,8 @@
       if (it.u && now - it.u <= (p.lookbackMs || 14 * 86400000)) fresh.push(it);
     }
     fresh.sort((a, b) => b.u - a.u); // most recently active first: new zombies are caught early, the old backlog drains over time
-    const want = suspects.concat(fresh.map(x => x.id));
+    const present=new Set(out.items.map(x=>x.id));
+    const want = [...new Set((p.checkIds||[]).filter(id=>present.has(id)).concat(suspects,fresh.map(x => x.id)))];
     for (const id of want.slice(0, p.maxStatus || 20)) {
       if (out.rate) break;
       const r = await get("/backend-api/conversation/" + id + "/stream_status");

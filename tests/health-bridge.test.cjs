@@ -1,0 +1,13 @@
+const test=require('node:test'),assert=require('node:assert/strict'),H=require('../extension/health_bridge.js'),fs=require('node:fs'),path=require('node:path');
+const now=1792700000000,id='chat-1';
+const scan={ok:true,items:[{id,a:3,u:now-1000}],statuses:{[id]:'COMPLETE'}};
+const state=()=>({health:H.observe({},scan,now)});
+test('async run survives COMPLETE stream',()=>assert.equal(H.snapshot(id,state(),{}, {},now).state,'ASYNC_RUNNING'));
+test('idle stream does not mean verified result',()=>{const r=state();r.health[id].async_status=0;assert.equal(H.snapshot(id,r,{}, {},now).state,'NO_ACTIVE_STREAM');});
+test('unknown and future observation clocks are not refreshed by reading',()=>{const r=state();assert.equal(H.snapshot(id,r,{}, {},now+400000).state,'UNKNOWN');r.health[id].list_observed_at_ms=now+100000;assert.equal(H.snapshot(id,r,{}, {},now).state,'UNKNOWN');});
+test('new list is not a new stream check',()=>{const r=H.observe(state().health,{ok:true,items:[{id,a:0,u:now+1}],statuses:{}},now+10);assert.equal(H.snapshot(id,{health:r},{},{},now+10).state,'UNKNOWN');});
+test('cooldown and master disabled remain visible',()=>{assert.equal(H.snapshot(id,state(),{}, {detail:{cd:now+5000}},now).state,'RATE_LIMITED');assert.equal(H.snapshot(id,state(),{enabled:false},{},now).state,'OBSERVER_DISABLED');});
+test('read is metadata only and no action',()=>{const r=H.snapshot(id,state(),{},{},now);assert.equal(r.network_requests_started,0);for(const x of ['send','retry','stop'])assert.equal(r[x],false);assert.ok(!JSON.stringify(r).includes('token'));});
+test('snapshot request rejects invalid identities',()=>{for(const x of ['../x','','x?secret',null])assert.equal(H.snapshot(x).ok,false);});
+test('no observation for other chat',()=>assert.equal(H.snapshot('chat-2',state(),{},{},now).reason,'NO_SCOPED_OBSERVATION'));
+test('external endpoint cannot force audit, send or stop',()=>{const s=fs.readFileSync(path.join(__dirname,'../extension/background.js'),'utf8').split('// HYDRA requests cached evidence only.')[1];assert.ok(s.includes('onMessageExternal'));assert.ok(s.includes('opgnfgihbjphabgflgnaiamenmdgfjom'));assert.doesNotMatch(s,/fetch\(|reaperTick\(|tabs\.sendMessage|stopStream\(/);});
