@@ -521,6 +521,25 @@ try {
   lim.listRate = false;
   await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 60 * 60000, reaperFastMs: 5 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
 
+  // 14a) restart: an unloaded tab is reloaded by the extension itself once the limiter is calm (nobody has to click it)
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await sleep(1500);
+  await resetMock();
+  await openTab("https://chatgpt.com/c/restartA");
+  await openTab("https://chatgpt.com/c/restartB");
+  await sleep(4000);
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>{const t=ts.find(x=>(x.url||x.pendingUrl||'').includes('restartB')); return t ? chrome.tabs.update(t.id,{active:true}) : null})");
+  await sleep(1500);
+  const rsId = (await tabsList()).find(t => t.url.includes("restartA")).id;
+  const rsR = await call({ type: "restart", id: rsId });
+  check("restart: accepted for a background tab", rsR && rsR.ok === true, rsR);
+  let rsBack = false;
+  for (let i = 0; i < 90 && !rsBack; i++) { const row = (await tabsList()).find(t => t.id === rsId); const j = (await snap()).journal || []; rsBack = !!row && j.some(e => e.e === "restart" && e.tab === rsId); if (!rsBack) await sleep(1000); }
+  check("restart: the extension reloaded the tab BY ITSELF (no click)", rsBack, (await snap()).journal.filter(e => /^restart/.test(e.e)).slice(-3));
+  const rsRow = (await tabsList()).find(t => t.id === rsId);
+  check("restart: the tab is back and not discarded", rsRow && !rsRow.discarded, rsRow);
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+
   // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await ev(pop, "chrome.storage.local.remove(['reaper','hib'])");

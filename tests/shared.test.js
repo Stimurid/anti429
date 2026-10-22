@@ -282,3 +282,13 @@ test("healPauseMs: escalating global pause after consecutive failed heals, cappe
   assert.deepEqual([1, 2, 3, 4, 5].map(A.healPauseMs), [120000, 240000, 480000, 900000, 1800000]);
   assert.equal(A.healPauseMs(99), 1800000);
 });
+
+test("restartPick: one tab at a time, only when calm, after the pause, oldest due first", () => {
+  const now = 100 * 3600000;
+  const q = [{ id: 7, dueAt: now - 1000 }, { id: 3, dueAt: now - 5000 }, { id: 9, dueAt: now + 60000 }];
+  assert.equal(A.restartPick(q, { now, calm: true }), 3, "oldest due first");
+  assert.equal(A.restartPick(q, { now, calm: false }), null, "not calm: wait");
+  assert.equal(A.restartPick(q, { now, calm: true, pausedUntil: now + 1000 }), null, "global heal pause");
+  assert.equal(A.restartPick(q, { now, calm: true, lastRestartAt: now - 5000 }), null, "25 s spacing between restarts");
+  assert.equal(A.restartPick([{ id: 9, dueAt: now + 60000 }], { now, calm: true }), null, "not due yet");
+});

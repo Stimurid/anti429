@@ -163,6 +163,26 @@
   const HEAL_PAUSE_MS = [0, 120000, 240000, 480000, 900000, 1800000];
   function healPauseMs(streak) { return HEAL_PAUSE_MS[Math.max(0, Math.min(HEAL_PAUSE_MS.length - 1, streak | 0))]; }
 
+  // Restart queue: reload tabs ONE AT A TIME, only when the limiter is calm (the owner never has to hunt for them).
+  // queue: [{ id, dueAt }]; ctx: { now, calm, lastRestartAt, gapMs, pausedUntil } -> tab id to reload now, or null.
+  function restartPick(queue, ctx) {
+    const c = Object.assign({ now: Date.now(), calm: false, lastRestartAt: 0, gapMs: 25000, pausedUntil: 0 }, ctx || {});
+    if (!c.calm || c.now < c.pausedUntil) return null;
+    if (c.now - c.lastRestartAt < c.gapMs) return null;
+    const due = (queue || []).filter(q => q.dueAt <= c.now).sort((a, b) => a.dueAt - b.dueAt);
+    return due.length ? due[0].id : null;
+  }
+
+  // Restart queue: reload tabs ONE AT A TIME, only when the limiter is calm (the owner never has to hunt for them).
+  // queue: [{ id, dueAt }]; ctx: { now, calm, lastRestartAt, gapMs, pausedUntil } -> tab id to reload now, or null.
+  function restartPick(queue, ctx) {
+    const c = Object.assign({ now: Date.now(), calm: false, lastRestartAt: 0, gapMs: 25000, pausedUntil: 0 }, ctx || {});
+    if (!c.calm || c.now < c.pausedUntil) return null;
+    if (c.now - c.lastRestartAt < c.gapMs) return null;
+    const due = (queue || []).filter(q => q.dueAt <= c.now).sort((a, b) => a.dueAt - b.dueAt);
+    return due.length ? due[0].id : null;
+  }
+
   // Heal budget per tab, independent of the tab's banner state (which flips as the page retries on its own):
   // at most `max` automatic heals per `windowMs`, otherwise a tab whose Try-again does not help is poked forever.
   function healBudgetOk(times, now, max, windowMs) {
@@ -301,7 +321,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    runVerdict, shouldHibernate, healBudgetOk, healPauseMs,
+    runVerdict, shouldHibernate, healBudgetOk, healPauseMs, restartPick, restartPick,
     GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,

@@ -94,7 +94,33 @@ const ready = (async () => {
 let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
 let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
 const HB = {};    // tabId -> timestamps of automatic heals (the budget)
-const HF = { streak: 0, until: 0, last: 0 }; // consecutive heals answered by another 429 -> escalating global pause
+const HF = { streak: 0, until: 0, last: 0 };
+const RQ = [];    // restart queue [{ id, dueAt, why }]: tabs to reload by themselves once the limiter is calm
+let lastRestartAt = 0;
+const HRB = {};   // tabId -> time of the last automatic restart after hibernation (once per hour)
+const rqReady = chrome.storage.local.get("rq").then(r => { for (const q of (r.rq || [])) if (!RQ.some(x => x.id === q.id)) RQ.push(q); }).catch(() => {});
+const saveRQ = () => chrome.storage.local.set({ rq: RQ }).catch(() => {});
+function queueRestart(id, delayMs, why) {
+  const i = RQ.findIndex(q => q.id === id);
+  if (i >= 0) RQ.splice(i, 1);
+  RQ.push({ id, dueAt: Date.now() + delayMs, why });
+  saveRQ();
+  jr("restart-queued", { tab: id, why, inSec: Math.round(delayMs / 1000) });
+}
+async function restartTick(now) {
+  await rqReady;
+  if (!RQ.length) return;
+  const id = A.restartPick(RQ, { now, calm: calmNow(now), lastRestartAt, gapMs: 25000, pausedUntil: HF.until });
+  if (id == null) return;
+  const i = RQ.findIndex(q => q.id === id);
+  const q = RQ.splice(i, 1)[0];
+  saveRQ();
+  let tab = null;
+  try { tab = await chrome.tabs.get(id); } catch {}
+  if (!tab) return;
+  lastRestartAt = now;
+  try { await chrome.tabs.reload(id); jr("restart", { tab: id, why: q.why }); } catch {}
+} // consecutive heals answered by another 429 -> escalating global pause
 const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").replace(/[0-9a-f]{16,}/g, "<hex>").slice(0, 70);
 const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
 function jr(e, data) {
@@ -580,6 +606,7 @@ async function hibernateTick() {
         hib.unshift({ id, t: tab.title || tab.url, url: tab.url, at: now, n: stats.c429_10 });
         await chrome.storage.local.set({ hib: hib.slice(0, 20) });
         jr("hib", { tab: id, n: stats.c429_10 });
+        if (now - (HRB[id] || 0) > 3600000) { HRB[id] = now; queueRestart(id, 5 * 60000, "after-hibernate"); } // once per hour per tab
         notifyLoop("a429-hib-" + id + "-" + now, "Вкладка усыплена: зациклилась", (tab.title || "вкладка") + " (" + stats.c429_10 + "×429 за 10 мин). Она осталась на месте, кликните по ней, чтобы загрузить.");
       }
     } else if (v.reason === "active" && now - (HIB_NOTIFIED[id] || 0) > 30 * 60000) {
@@ -614,6 +641,7 @@ async function healTick() {
   autoStopTick().catch(() => {});
   hibernateTick().catch(() => {});
   memoryTick().catch(() => {});
+  restartTick(Date.now()).catch(() => {});
   journalTick(Date.now()).catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   if (Date.now() < HF.until) return; // paused after a heal that got another 429
@@ -819,6 +847,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
+      case "restart": {
+        let tab = null;
+        try { tab = await chrome.tabs.get(msg.id); } catch {}
+        if (!tab) return sendResponse({ ok: false, reason: "gone" });
+        const risky = P[msg.id] && (P[msg.id].draft || P[msg.id].generating);
+        if (risky && !msg.force) return sendResponse({ ok: false, reason: P[msg.id].generating ? "generating" : "draft" });
+        if (!tab.discarded && !tab.active) { const r = await discardTabs([msg.id], !!msg.force); if (r.skipped.length) return sendResponse({ ok: false, reason: r.skipped[0].reason }); }
+        queueRestart(msg.id, 15000, "owner");
+        return sendResponse({ ok: true, afterSec: 15 });
+      }
       case "focus": {
         const t = await chrome.tabs.update(msg.id, { active: true });
         if (t) await chrome.windows.update(t.windowId, { focused: true });

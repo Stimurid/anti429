@@ -43,6 +43,8 @@ function renderMeters() {
 
 function tabLabel(t) { return (t.title || t.url || "").replace(/^ChatGPT\s*[-–—]?\s*/i, "") || t.url; }
 
+let curTabId = null; // the tab the owner is looking at (active tab of the last focused normal window)
+
 function renderTabs() {
   const box = $("tabs");
   box.replaceChildren();
@@ -50,7 +52,7 @@ function renderTabs() {
     const s = snap.tabs[t.id] || { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: 0, loop: false };
     return { t, s };
   }).sort((a, b) =>
-    (b.s.loop - a.s.loop) || (b.s.held - a.s.held) || (b.s.req60 - a.s.req60) || (b.s.mb10 - a.s.mb10));
+    ((b.t.id === curTabId) - (a.t.id === curTabId)) || (b.s.req60 - a.s.req60) || (b.s.loop - a.s.loop) || (b.s.held - a.s.held) || (b.s.mb10 - a.s.mb10));
   $("tabCount").textContent = `${rows.length} шт., ${rows.filter(r => r.s.loop).length} с циклом`;
 
   for (const { t, s } of rows) {
@@ -79,6 +81,16 @@ function renderTabs() {
     const canDiscard = !t.active && !t.discarded;
     const b = el("div", { class: "b" },
       el("button", { class: "small ghost", text: "Показать", title: "Перейти к этой вкладке (в её окне)", onclick: () => send({ type: "focus", id: t.id }) }),
+      el("button", { class: "small", text: "Перезапустить", title: "Остановит запросы этой вкладки и сама загрузит её заново через ~15 с, когда лимит спокоен. Искать и кликать не нужно.",
+        onclick: async () => {
+          let r = await send({ type: "restart", id: t.id });
+          if (r && !r.ok && (r.reason === "draft" || r.reason === "generating")) {
+            if (!confirm(r.reason === "generating" ? "В этой вкладке идёт ответ. Перезапуск прервёт его отображение. Перезапустить?" : "В этой вкладке есть неотправленный черновик. Он может пропасть. Перезапустить?")) return;
+            r = await send({ type: "restart", id: t.id, force: true });
+          }
+          if (r && !r.ok) alert("Не получилось: " + (r.reason || "нет ответа"));
+          refresh();
+        } }),
       el("button", { class: "small", text: "Сбросить", disabled: canDiscard ? null : "", title: "Выгрузить содержимое, вкладка останется",
         onclick: async () => {
           const risky = s.draft || s.generating;
@@ -219,6 +231,11 @@ async function refresh() {
   try {
     snap = await send({ type: "snapshot" });
     tabsNow = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+    try {
+      const w = await chrome.windows.getLastFocused({ windowTypes: ["normal"], populate: true });
+      const a = w && w.tabs && w.tabs.find(x => x.active);
+      curTabId = a ? a.id : null;
+    } catch { curTabId = null; }
     if (!snap || snap.error) return;
     renderHeader(); renderMeters(); renderTabs(); renderSessions(); renderJournal(); renderHib(); renderRuns(); renderReaper();
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
