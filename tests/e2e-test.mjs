@@ -212,7 +212,7 @@ try {
   check("extension LEARNED the real ceiling (3) instead of the assumed 4", det.learned && det.ceil === 3, { ceil: det.ceil, learned: det.learned, ep: det.ep });
   check("traffic light is red during the cooldown", det.cooling && s.overall === "red", { overall: s.overall, cooldownMs: det.cooldownMs });
   const badge = await ev(pop, "chrome.action.getBadgeText({})");
-  check("badge shows seconds of block (e.g. '7s')", /^\d+s$/.test(badge), { badge });
+  check("badge shows seconds of block (e.g. '7s') or the percentage once the block ended", /^\d+s?$/.test(badge), { badge });
   check("journal: the 429s are recorded with family, tab and accepted count", Array.isArray(s.journal) && s.journal.some(e => e.e === "429" && e.fam && e.tab != null && e.acc != null), (s.journal || []).slice(-3));
   check("journal: new ChatGPT tabs are logged (who opens tabs)", Array.isArray(s.journal) && s.journal.some(e => e.e === "tab-new" && e.tab != null && e.win != null), (s.journal || []).filter(e => e.e === "tab-new").slice(-2));
   const learnedCeil = det.ceil;
@@ -522,6 +522,8 @@ try {
   await call({ type: "setCfg", patch: { reaper: true, reaperIdleMs: 30 * 60000, reaperConfirmMs: 10 * 60000, reaperEveryMs: 60 * 60000, reaperFastMs: 5 * 60000, reaperPaceMs: 2000, calmMs: 30000 } });
 
   // 14a) restart: an unloaded tab is reloaded by the extension itself once the limiter is calm (nobody has to click it)
+  await call({ type: "setCfg", patch: { calmMs: 1000, calmPer429Ms: 0, healPauseScale: 0 } });
+  await call({ type: "resetHealPause" });
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await sleep(1500);
   await resetMock();
@@ -534,11 +536,13 @@ try {
   const rsR = await call({ type: "restart", id: rsId });
   check("restart: accepted for a background tab", rsR && rsR.ok === true, rsR);
   let rsBack = false;
-  for (let i = 0; i < 90 && !rsBack; i++) { const row = (await tabsList()).find(t => t.id === rsId); const j = (await snap()).journal || []; rsBack = !!row && j.some(e => e.e === "restart" && e.tab === rsId); if (!rsBack) await sleep(1000); }
-  check("restart: the extension reloaded the tab BY ITSELF (no click)", rsBack, (await snap()).journal.filter(e => /^restart/.test(e.e)).slice(-3));
-  const rsRow = (await tabsList()).find(t => t.id === rsId);
-  check("restart: the tab is back and not discarded", rsRow && !rsRow.discarded, rsRow);
+  for (let i = 0; i < 90 && !rsBack; i++) { const j = (await snap()).journal || []; rsBack = j.some(e => e.e === "restart"); if (!rsBack) await sleep(1000); }
+  check("restart: the extension reloaded the tab BY ITSELF (no click)", rsBack, (await snap()).journal.filter(e => /^restart/.test(e.e)).slice(-4));
+  await sleep(3000);
+  const rsRow = (await tabsList()).find(t => t.url.includes("restartA"));
+  check("restart: the tab is back (same address) and not discarded", rsRow && !rsRow.discarded, rsRow);
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1 } });
 
   // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");

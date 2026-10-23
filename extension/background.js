@@ -100,10 +100,10 @@ let lastRestartAt = 0;
 const HRB = {};   // tabId -> time of the last automatic restart after hibernation (once per hour)
 const rqReady = chrome.storage.local.get("rq").then(r => { for (const q of (r.rq || [])) if (!RQ.some(x => x.id === q.id)) RQ.push(q); }).catch(() => {});
 const saveRQ = () => chrome.storage.local.set({ rq: RQ }).catch(() => {});
-function queueRestart(id, delayMs, why) {
+function queueRestart(id, delayMs, why, url) {
   const i = RQ.findIndex(q => q.id === id);
   if (i >= 0) RQ.splice(i, 1);
-  RQ.push({ id, dueAt: Date.now() + delayMs, why });
+  RQ.push({ id, dueAt: Date.now() + delayMs, why, url: url || null });
   saveRQ();
   jr("restart-queued", { tab: id, why, inSec: Math.round(delayMs / 1000) });
 }
@@ -117,9 +117,11 @@ async function restartTick(now) {
   saveRQ();
   let tab = null;
   try { tab = await chrome.tabs.get(id); } catch {}
-  if (!tab) return;
+  // discarding may hand the page a NEW tab id: find it again by its address
+  if (!tab && q.url) { try { tab = (await chatTabs()).find(x => x.url === q.url && x.discarded) || null; } catch {} }
+  if (!tab) { jr("restart-lost", { tab: id, why: q.why }); return; }
   lastRestartAt = now;
-  try { await chrome.tabs.reload(id); jr("restart", { tab: id, why: q.why }); } catch {}
+  try { await chrome.tabs.reload(tab.id); jr("restart", { tab: tab.id, why: q.why }); } catch (e) { jr("restart-failed", { tab: tab.id, err: String(e && e.message || e).slice(0, 80) }); }
 } // consecutive heals answered by another 429 -> escalating global pause
 const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").replace(/[0-9a-f]{16,}/g, "<hex>").slice(0, 70);
 const jrReady = chrome.storage.local.get("journal").then(r => { JR = (r.journal || []).concat(JR).slice(-400); }).catch(() => {});
@@ -847,14 +849,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
+      case "resetHealPause": HF.streak = 0; HF.until = 0; return sendResponse({ ok: true }); // test hook
       case "restart": {
         let tab = null;
         try { tab = await chrome.tabs.get(msg.id); } catch {}
         if (!tab) return sendResponse({ ok: false, reason: "gone" });
         const risky = P[msg.id] && (P[msg.id].draft || P[msg.id].generating);
         if (risky && !msg.force) return sendResponse({ ok: false, reason: P[msg.id].generating ? "generating" : "draft" });
-        if (!tab.discarded && !tab.active) { const r = await discardTabs([msg.id], !!msg.force); if (r.skipped.length) return sendResponse({ ok: false, reason: r.skipped[0].reason }); }
-        queueRestart(msg.id, 15000, "owner");
+        let rid = msg.id;
+        if (!tab.discarded && !tab.active) {
+          const verdict = A.canDiscard(P[msg.id], { active: false, discarded: false, audible: tab.audible, force: !!msg.force });
+          if (!verdict.ok) return sendResponse({ ok: false, reason: verdict.reason });
+          try { const t = await chrome.tabs.discard(msg.id); if (t && t.id != null) rid = t.id; } catch {}
+          delete T[msg.id]; delete H[msg.id]; delete P[msg.id]; delete G[msg.id]; delete B[msg.id];
+        }
+        queueRestart(rid, 15000, "owner", tab.url);
         return sendResponse({ ok: true, afterSec: 15 });
       }
       case "focus": {
