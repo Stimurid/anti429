@@ -103,6 +103,16 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
   }
   if (u.pathname.startsWith("/c/")) { res.setHeader("content-type", "text/html"); return res.end(PAGE); }
   if (u.pathname === "/__reset") { reset(); return res.end("ok"); }
+  if (u.pathname === "/backend-api/conversations/evil1" && lim.evil) {
+    // Models the real service (2026-10-21): Retry-After says 1 s, but the server wants SILENCE (quiet_ms) since the last
+    // request, and every request, even a refused one, restarts that silence. A client that retries at Retry-After never gets in.
+    const E = lim.evil, t = Date.now();
+    E.hits.push(t);
+    const quiet = t - E.last >= E.quietMs;
+    E.last = t;
+    if (!quiet) { res.statusCode = 429; res.setHeader("retry-after", "1"); return res.end('{"detail":"Too many requests"}'); }
+    res.setHeader("content-type", "application/json"); return res.end('{"ok":true}');
+  }
   if (u.pathname === "/backend-api/conversations/brk1") {
     lim.brk++;
     if (lim.brk <= 3) { res.statusCode = 429; res.setHeader("retry-after", "1"); return res.end('{"detail":"Too many requests"}'); }
@@ -435,7 +445,8 @@ try {
   for (let i = 0; i < 90 && !zdone; i++) { zt = await titleOf("zombie1"); zdone = zt && /^zombie loaded/.test(zt.t); if (!zdone) await sleep(1000); }
   check("zombie chat: after the breaker trips the page stops looping, gets COMPLETE and loads the history", zdone, zt && zt.t);
   check("the page did NOT hammer the server forever (bounded number of resume POSTs)", (lim.resumeTotal || 0) <= 14, { resumePosts: lim.resumeTotal });
-  const zsn = await snap();
+  let zsn = await snap();
+  for (let i = 0; i < 12 && !(zt && zsn.tabs[zt.id] && zsn.tabs[zt.id].deadStream > 0); i++) { await sleep(500); zsn = await snap(); } // the event travels page -> bridge -> worker: on a loaded machine it can arrive a moment after the page already finished
   check("the tab is flagged 'dead stream' in the dashboard", zt && zsn.tabs[zt.id] && zsn.tabs[zt.id].deadStream > 0, zt && zsn.tabs[zt.id]);
 
   // 10) manual "mark as stuck": the user does not want to wait for two failed recoveries
@@ -543,6 +554,27 @@ try {
   check("restart: the tab is back (same address) and not discarded", rsRow && !rsRow.discarded, rsRow);
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await call({ type: "setCfg", patch: { calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1 } });
+
+  // 14c) the 'evil' server (accumulating penalty): a client that retries at Retry-After never gets in. The escalating heal
+  //      pause must space the attempts out until the required silence is reached, then the tab heals by itself.
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 500, calmPer429Ms: 0, healPauseScale: 0.01, healGapMs: 500, healBackoffScale: 0.01, autoHeal: true, hibernate: false, notifyStorm: false } });
+  await call({ type: "resetHealPause" });
+  await sleep(1500);
+  await resetMock();
+  lim.evil = { hits: [], last: Date.now() + 2000, quietMs: 3000 }; // the very first request is refused too
+  await openTab("https://chatgpt.com/c/evil1?broken=1");
+  let evilOk = false;
+  for (let i = 0; i < 70 && !evilOk; i++) { const t = await titleOf("evil1"); evilOk = !!t && /^healed/.test(t.t); if (!evilOk) await sleep(1000); }
+  const eh = (lim.evil && lim.evil.hits) || [];
+  const egaps = eh.slice(1).map((t, i) => t - eh[i]);
+  check("evil server: the tab healed by itself although plain retrying at Retry-After can never succeed", evilOk && eh.length >= 3, { hits: eh.length, gapsMs: egaps });
+  check("evil server: attempts were spaced out, not hammered (at most 12 requests in total)", eh.length <= 12 && eh.length >= 2, { hits: eh.length });
+  const evilJ = ((await snap()).journal || []).filter(e => e.e === "heal-pause");
+  check("evil server: the journal shows the escalating pause", evilJ.length >= 1, evilJ.slice(-3));
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1, hibernate: true } });
+  await call({ type: "resetHealPause" });
 
   // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
