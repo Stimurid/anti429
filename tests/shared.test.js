@@ -307,3 +307,13 @@ test("reaperVerdict: an open tab that still says 'generating' is NOT protected f
   const edge = A.reaperVerdict(null, { status: "IS_STREAMING", updMs: now - 16 * 60000, generatingTab: true }, now, cfg);
   assert.equal(edge.reason, "first-sight", "16 min of silence: no longer protected");
 });
+
+test("hotHoldMs: refusals in a row with nothing accepted hold the family longer (2, 4, 8, 15 min), the first one does not", () => {
+  assert.equal(A.hotHoldMs(0), 0);
+  assert.equal(A.hotHoldMs(1), 0);
+  assert.equal(A.hotHoldMs(2), 2 * 60000);
+  assert.equal(A.hotHoldMs(3), 4 * 60000);
+  assert.equal(A.hotHoldMs(4), 8 * 60000);
+  assert.equal(A.hotHoldMs(5), 15 * 60000);
+  assert.equal(A.hotHoldMs(40), 15 * 60000);
+});

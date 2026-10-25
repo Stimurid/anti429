@@ -161,6 +161,11 @@
   // After a heal that was answered with another 429 the server needs real silence: Retry-After alone is not enough
   // (it is understated and the penalty accumulates). Pause all automatic heals, doubling per consecutive failure.
   const HEAL_PAUSE_MS = [0, 120000, 240000, 480000, 900000, 1800000];
+  // Refusals in a row with NOTHING accepted before them mean the account is in penalty, and the server does not honour
+  // its own Retry-After (~50 s): every request it refuses extends the silence it wants (2026-10-25: one tab polling its
+  // chat once a minute kept the whole account locked for an hour). From the 2nd such refusal hold the family longer.
+  const HOT_HOLD_MS = [0, 0, 2 * 60000, 4 * 60000, 8 * 60000, 15 * 60000];
+  function hotHoldMs(streak) { return HOT_HOLD_MS[Math.max(0, Math.min(HOT_HOLD_MS.length - 1, streak | 0))]; }
   function healPauseMs(streak) { return HEAL_PAUSE_MS[Math.max(0, Math.min(HEAL_PAUSE_MS.length - 1, streak | 0))]; }
 
   // Restart queue: reload tabs ONE AT A TIME, only when the limiter is calm (the owner never has to hunt for them).
@@ -326,7 +331,7 @@
   function isHealableStatus(status) { return status === 429 || status >= 500 || status === 0; }
 
   return {
-    runVerdict, shouldHibernate, healBudgetOk, healPauseMs, restartPick, restartPick,
+    runVerdict, shouldHibernate, healBudgetOk, healPauseMs, hotHoldMs, restartPick, restartPick,
     GEN: 3, // page-side generation: bump when guard.js/recovery.js/bridge.js change behaviour
     reaperVerdict, REAPER_DEFAULTS,
     shouldAutoStop,

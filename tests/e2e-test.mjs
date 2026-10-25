@@ -217,7 +217,7 @@ try {
   await dbg(`/json/close/${preTab.id}`);
 
   // 1) learning: guard OFF, burst of 10 against a limiter that allows only 3 per 3 s (assumed ceiling is 4)
-  await call({ type: "setCfg", patch: { enabled: false, notifyStorm: false } });
+  await call({ type: "setCfg", patch: { enabled: false, notifyStorm: false, hotHoldScale: 0 } }); // long holds after repeated refusals are tested in 14c only
   const warm = await openTab("https://chatgpt.com/c/warm"); // bridge mirrors cfg into the origin's localStorage on load
   await sleep(2000);
   await dbg(`/json/close/${warm.id}`);
@@ -565,6 +565,16 @@ try {
   await sleep(3000);
   const rsRow = (await tabsList()).find(t => t.url.includes("restartA"));
   check("restart: the tab is back (same address) and not discarded", rsRow && !rsRow.discarded, rsRow);
+  // 14b) restart of the tab the owner is LOOKING at: Chrome cannot discard it, so it is parked on the holding page
+  // (no more requests from it) and brought back to the chat by the extension when calm
+  const actId = (await tabsList()).find(t => t.url.includes("restartB")).id;
+  const rsA = await call({ type: "restart", id: actId });
+  await sleep(800);
+  const parked = await ev(pop, `chrome.tabs.get(${actId}).then(t=>t.url||t.pendingUrl||'')`);
+  check("restart of the ACTIVE tab parks it on the holding page (its page stops asking the server)", rsA && rsA.ok === true && /hold\.html#/.test(parked) && /restartB/.test(decodeURIComponent(parked)), { rsA, parked });
+  let back = "";
+  for (let i = 0; i < 90 && !/chatgpt\.com\/c\/restartB/.test(back); i++) { await sleep(1000); back = await ev(pop, `chrome.tabs.get(${actId}).then(t=>t.url||t.pendingUrl||'').catch(()=>'')`); }
+  check("the parked tab is returned to its chat by the extension when calm", /chatgpt\.com\/c\/restartB/.test(back), { back });
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await call({ type: "setCfg", patch: { calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1 } });
 
@@ -586,7 +596,7 @@ try {
   // 14c) the 'evil' server (accumulating penalty): a client that retries at Retry-After never gets in. The escalating heal
   //      pause must space the attempts out until the required silence is reached, then the tab heals by itself.
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 500, calmPer429Ms: 0, healPauseScale: 0.01, healGapMs: 500, healBackoffScale: 0.01, autoHeal: true, hibernate: false, notifyStorm: false } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 500, calmPer429Ms: 0, healPauseScale: 0.01, healGapMs: 500, healBackoffScale: 0.01, autoHeal: true, hibernate: false, notifyStorm: false, hotHoldScale: 0.005 } });
   await call({ type: "resetHealPause" });
   await sleep(1500);
   await resetMock();
@@ -600,8 +610,10 @@ try {
   check("evil server: attempts were spaced out, not hammered (at most 12 requests in total)", eh.length <= 12 && eh.length >= 2, { hits: eh.length });
   const evilJ = ((await snap()).journal || []).filter(e => e.e === "heal-pause");
   check("evil server: the journal shows the escalating pause", evilJ.length >= 1, evilJ.slice(-3));
+  const hotJ = ((await snap()).journal || []).filter(e => e.e === "hot-hold");
+  check("evil server: refusals in a row with nothing accepted made the family hold longer (hot-hold)", hotJ.length >= 1, hotJ.slice(-3));
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1, hibernate: true } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1, hibernate: true, hotHoldScale: 0 } });
   await call({ type: "resetHealPause" });
 
   // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>⏸ ждёт</title>
+<style>
+  :root { --bg: #f3f6fa; --panel: #ffffff; --fg: #14202b; --muted: #52657a; --warn: #a96a00; --line: #d9e1eb; --accent: #1f6feb; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0e141b; --panel: #151d27; --fg: #e6edf5; --muted: #8ea0b5; --warn: #f5b64a; --line: #263344; --accent: #6ea8ff; } }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 520px; margin: 16px; padding: 24px 28px; background: var(--panel); border: 1px solid var(--line);
+    border-top: 4px solid var(--warn); border-radius: 10px; }
+  h1 { font-size: 19px; margin: 0 0 10px; }
+  p { margin: 0 0 12px; color: var(--muted); }
+  #chat { color: var(--fg); font-weight: 600; word-break: break-word; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Эта вкладка ждёт, пока сервер ChatGPT успокоится</h1>
+  <p>Чат: <span id="chat">—</span></p>
+  <p>Сервер отказывал в загрузке, и каждая попытка продлевала отказ. 4̅2̅9̅ убрал отсюда страницу ChatGPT и сам вернёт её, когда сервер будет спокоен. Ничего нажимать не нужно.</p>
+  <p><a id="now" href="#">Открыть чат сейчас</a> — если очень нужно; при перегруженном сервере он, скорее всего, снова не загрузится.</p>
+</main>
+<script src="hold.js"></script>
+</body>
+</html>

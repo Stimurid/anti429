@@ -37,6 +37,7 @@ const DEFAULT_CFG = {
   healGapMs: 15000,       // at least this long between two heals (any tabs)
   healBackoffScale: 1,    // multiplies the per-tab retry spacing (test hook)
   healPauseScale: 1,      // multiplies the global pause after a failed heal (test hook)
+  hotHoldScale: 1,        // multiplies the longer hold after refusals in a row with nothing accepted (test hook)
   notifyStorm: true       // desktop notification when 3+ ChatGPT tabs are opened within 3 minutes
 };
 
@@ -114,6 +115,7 @@ let lastRestartAt = 0;
 const HRB = {};   // tabId -> time of the last automatic restart after hibernation (once per hour)
 const rqReady = chrome.storage.local.get("rq").then(r => { for (const q of (r.rq || [])) if (!RQ.some(x => x.id === q.id)) RQ.push(q); }).catch(() => {});
 const saveRQ = () => chrome.storage.local.set({ rq: RQ }).catch(() => {});
+const HOLD_URL = chrome.runtime.getURL("hold.html");
 function queueRestart(id, delayMs, why, url) {
   const i = RQ.findIndex(q => q.id === id);
   if (i >= 0) RQ.splice(i, 1);
@@ -135,6 +137,10 @@ async function restartTick(now) {
   if (!tab && q.url) { try { tab = (await chatTabs()).find(x => x.url === q.url && x.discarded) || null; } catch {} }
   if (!tab) { jr("restart-lost", { tab: id, why: q.why }); return; }
   lastRestartAt = now;
+  if (String(tab.url || "").startsWith(HOLD_URL) && q.url) {
+    try { await chrome.tabs.update(tab.id, { url: q.url }); jr("restart", { tab: tab.id, why: q.why, from: "hold" }); } catch (e) { jr("restart-failed", { tab: tab.id, err: String(e && e.message || e).slice(0, 80) }); }
+    return;
+  }
   try { await chrome.tabs.reload(tab.id); jr("restart", { tab: tab.id, why: q.why }); } catch (e) { jr("restart-failed", { tab: tab.id, err: String(e && e.message || e).slice(0, 80) }); }
 } // consecutive heals answered by another 429 -> escalating global pause
 const normPath = p => p.replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/g, "<id>").replace(/g-p-[0-9a-f]+/g, "g-p-<id>").replace(/[0-9a-f]{16,}/g, "<hex>").slice(0, 70);
@@ -232,6 +238,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   if (details.statusCode !== 429) {
     if (details.statusCode < 400) {
       const fo = F[fam];
+      fo.hot = 0; // the server accepts again: the penalty is over
       (fo.oks || (fo.oks = [])).push(now);
       // An accepted reply that lands inside a 429 episode (rejections are usually faster than accepted answers)
       // raises the evidence for this episode; re-evaluate the ceiling from the episode maximum.
@@ -272,7 +279,10 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     saveHeal();
   }
   jr("429", { fam, tab: details.tabId, ra: ra ? Math.round(ra / 1000) : null, acc: observed, n10: f.c429.length, tabReq60: details.tabId >= 0 ? A.countIn(tabStats(details.tabId).req, now, 60000) : null });
-  f.cd = Math.max(f.cd, now + (ra || 15000));
+  f.hot = observed === 0 ? (f.hot || 0) + 1 : 0;
+  const hotHold = A.hotHoldMs(f.hot) * (cfg.hotHoldScale == null ? 1 : cfg.hotHoldScale);
+  if (hotHold) jr("hot-hold", { fam, streak: f.hot, min: Math.round(hotHold / 60000) });
+  f.cd = Math.max(f.cd, now + Math.max(ra || 15000, hotHold));
   if (details.tabId >= 0) tabStats(details.tabId).c429.push(now);
   chrome.storage.local.set({ ceilings, learned: Object.fromEntries(A.FAMILY_IDS.map(i => [i, F[i].learned])) });
   persistSoon();
@@ -883,6 +893,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const verdict = A.canDiscard(P[msg.id], { active: false, discarded: false, audible: tab.audible, force: !!msg.force });
           if (!verdict.ok) return sendResponse({ ok: false, reason: verdict.reason });
           try { const t = await chrome.tabs.discard(msg.id); if (t && t.id != null) rid = t.id; } catch {}
+          delete T[msg.id]; delete H[msg.id]; delete P[msg.id]; delete G[msg.id]; delete B[msg.id];
+        } else if (!tab.discarded) {
+          // Chrome cannot discard the tab the owner is looking at, and its page kept asking the server once a minute
+          // (2026-10-25). Park it on our holding page; restartTick brings the chat back when the server is calm.
+          try { await chrome.tabs.update(msg.id, { url: HOLD_URL + "#" + new URLSearchParams({ u: tab.url, t: (tab.title || "").slice(0, 120) }) }); } catch {}
           delete T[msg.id]; delete H[msg.id]; delete P[msg.id]; delete G[msg.id]; delete B[msg.id];
         }
         queueRestart(rid, 15000, "owner", tab.url);
