@@ -11,8 +11,9 @@ const DEFAULT_CFG = {
   loopMb10: 100,          // MB transferred in 10 min
   restoreGapSec: 12,      // pause between tabs when restoring a saved session
   reaper: true,           // account-wide audit: stop chats stuck on IS_STREAMING with a frozen update_time
-  reaperIdleMs: 30 * 60000,    // idle (since update_time) required before a chat may be stopped
-  reaperConfirmMs: 10 * 60000, // the SAME update_time must be seen again at least this much later
+  reaperIdleMs: 15 * 60000,    // idle (since update_time) required before a chat may be stopped (owner's rule: 15 min of no change)
+  reaperConfirmMs: 5 * 60000,  // the SAME update_time must be seen again at least this much later
+  reaperVisibleIdleMs: 15 * 60000, // an open tab that still shows 'generating' is protected only until update_time is this old
   reaperEveryMs: 15 * 60000,   // audit period when nothing is under suspicion (the head scan is only a few requests)
   runsEveryMs: 2 * 60000,      // audit period while background runs are being watched
   runStaleMs: 15 * 60000,      // a run whose update_time did not move for this long is shown as 'stalled'
@@ -68,6 +69,11 @@ const ready = (async () => {
     chrome.storage.session.get(["state"]).catch(() => ({}))
   ]);
   if (local.cfg) cfg = Object.assign({}, DEFAULT_CFG, local.cfg);
+  // older builds stored the then-default audit period (1 h) as if the owner had chosen it; move it to the current default
+  if (cfg.reaperEveryMs === 60 * 60000) cfg.reaperEveryMs = DEFAULT_CFG.reaperEveryMs;
+  // same for the previous reaper thresholds (30 min idle, 10 min confirm): the owner wants 15 and 5
+  if (cfg.reaperIdleMs === 30 * 60000) cfg.reaperIdleMs = DEFAULT_CFG.reaperIdleMs;
+  if (cfg.reaperConfirmMs === 10 * 60000) cfg.reaperConfirmMs = DEFAULT_CFG.reaperConfirmMs;
   if (local.ceilings) ceilings = Object.assign({}, A.DEFAULT_CEIL, local.ceilings);
   if (local.learned) for (const id of A.FAMILY_IDS) F[id].learned = !!local.learned[id];
   const s = session && session.state;
@@ -477,7 +483,7 @@ async function reaperTick(force) {
       if (status === undefined) continue; // not checked this time (too recent / over the cap)
       if (status === "COMPLETE") { R.chk[it.id] = { u: it.u, st: "COMPLETE" }; delete R.obs[it.id]; continue; }
       const v = A.reaperVerdict(R.obs[it.id] || null, { status, updMs: it.u, generatingTab: generating.has(it.id) }, now,
-        { idleMs: cfg.reaperIdleMs, confirmMs: cfg.reaperConfirmMs });
+        { idleMs: cfg.reaperIdleMs, confirmMs: cfg.reaperConfirmMs, visibleIdleMs: cfg.reaperVisibleIdleMs });
       if (v.rec) R.obs[it.id] = Object.assign({}, v.rec, { t: it.t });
       else delete R.obs[it.id];
       // A HYDRA observation lease never grants destructive recovery.
@@ -850,6 +856,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
       case "resetHealPause": HF.streak = 0; HF.until = 0; return sendResponse({ ok: true }); // test hook
+      case "chatStatus": {
+        let r = null;
+        try { r = await chrome.tabs.sendMessage(msg.id, { type: "a429_chatstatus" }); } catch {}
+        if (!r) return sendResponse({ ok: false, reason: "no-bridge" });
+        const known = S[msg.id] ? { seenAs: S[msg.id].status, sinceMin: Math.round((Date.now() - S[msg.id].since) / 60000) } : null;
+        return sendResponse(Object.assign({}, r, { known }));
+      }
       case "restart": {
         let tab = null;
         try { tab = await chrome.tabs.get(msg.id); } catch {}

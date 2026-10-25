@@ -7,87 +7,107 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <header>
-    <div class="logo"><span class="ol">429</span></div>
-    <div id="light" class="light idle" title="общий уровень"></div>
-    <div id="summary" class="summary">…</div>
-    <span class="spacer"></span>
-    <button id="btnWinL" class="small ghost" title="Отдельное окно у левого края экрана на всю высоту (границы можно двигать, размер запоминается)">◧ слева</button>
-    <button id="btnWinR" class="small ghost" title="Отдельное окно у правого края экрана на всю высоту (границы можно двигать, размер запоминается)">◨ справа</button>
-    <button id="btnPanel" class="small ghost" title="Открыть в боковой панели Chrome (на всю высоту)">▮ панель</button>
+  <header id="top" class="state-idle">
+    <div class="brand"><span class="logo"><span class="ol">429</span></span></div>
+    <div class="verdict">
+      <div id="summary" class="v-main">…</div>
+      <div id="summarySub" class="v-sub"></div>
+    </div>
+    <div class="views" role="group" aria-label="Где показывать панель">
+      <button id="btnWinL" class="icon" title="Отдельное окно у левого края экрана на всю высоту (границы можно двигать, размер запоминается)" aria-label="Окно слева">◧</button>
+      <button id="btnWinR" class="icon" title="Отдельное окно у правого края экрана на всю высоту (границы можно двигать, размер запоминается)" aria-label="Окно справа">◨</button>
+      <button id="btnPanel" class="icon" title="Открыть в боковой панели Chrome (на всю высоту)" aria-label="Боковая панель">▮</button>
+    </div>
+    <span id="light" hidden></span>
   </header>
 
-  <section>
-    <h2>Лимиты <small>запросов за 10 с к порогу</small></h2>
-    <div id="meters"></div>
-    <p class="note" id="meterNote"></p>
-  </section>
+  <main>
+    <section id="attnSec" class="attn" hidden>
+      <h2>Нужно внимание <span id="attnCount" class="count"></span></h2>
+      <div id="attn" class="tabs"></div>
+    </section>
 
-  <section>
-    <div class="row between">
-      <h2>Вкладки ChatGPT</h2>
-      <span class="note" id="tabCount"></span>
-    </div>
-    <div class="actions">
-      <button id="btnLoops" title="Выгрузить контент вкладок, которые крутят цикл опроса">Сбросить «дёргающие»</button>
-      <button id="btnBg" title="Выгрузить все фоновые вкладки ChatGPT (не активные и без звука)">Сбросить фоновые</button>
-      <button id="btnProtect" class="warn" hidden title="Подключить защиту к вкладкам, открытым до установки, без перезагрузки (F5 на всех сразу — это штурм)">Защитить открытые вкладки</button>
-    </div>
-    <p class="note" id="skipNote" hidden></p>
-    <div id="tabs" class="tabs"></div>
-    <p class="note">«Сбросить» = Chrome выгружает содержимое вкладки, сама вкладка остаётся и перезагрузится по клику. Неотправленный черновик может пропасть.</p>
-  </section>
+    <section>
+      <div class="row between">
+        <h2>Вкладки ChatGPT <span id="tabCount" class="count"></span></h2>
+        <div class="toolbar">
+          <button id="btnProtect" class="small warn" hidden title="Подключить защиту к вкладкам, открытым до установки, без перезагрузки (F5 на всех сразу — это штурм)">Защитить открытые</button>
+          <button id="btnLoops" class="small ghost" title="Выгрузить содержимое вкладок, которые слишком часто стучатся на сервер. Сами вкладки остаются на месте.">Выгрузить зацикленные</button>
+          <button id="btnBg" class="small ghost" title="Выгрузить все фоновые вкладки ChatGPT (не активные и без звука). Сами вкладки остаются на месте.">Выгрузить фоновые</button>
+        </div>
+      </div>
+      <p class="note" id="skipNote" hidden></p>
+      <div id="tabs" class="tabs"></div>
+      <p class="note">«Выгрузить» убирает страницу из памяти, вкладка остаётся и загрузится при клике. «Перезапустить» делает то же и сама загружает вкладку заново, когда сервер спокоен. Неотправленный текст может пропасть.</p>
+    </section>
 
-  <section>
-    <h2>Журнал событий <small>что реально происходило (сохраняется после перезапуска)</small></h2>
-    <pre id="jrBox" class="note" style="white-space:pre-wrap;font-size:11px;max-height:180px;overflow:auto"></pre>
-  </section>
+    <details class="sec" id="secMeters">
+      <summary><span class="s-title">Лимиты сервера</span><span id="meterSum" class="s-sum"></span></summary>
+      <div class="s-body">
+        <div id="meters"></div>
+        <p class="note" id="meterNote"></p>
+      </div>
+    </details>
 
-  <section id="hibSec" hidden>
-    <h2>Усыплены из-за цикла <small>вкладки остались на месте</small></h2>
-    <div id="hibBox"></div>
-    <p class="note">Эти вкладки слали десятки запросов с 429 и держали блокировку всего аккаунта. Кликните по вкладке, чтобы загрузить её заново, лучше когда лимит зелёный.</p>
-  </section>
+    <details class="sec" id="secRuns">
+      <summary><span class="s-title">Фоновые прогоны</span><span id="runsSum" class="s-sum"></span></summary>
+      <div class="s-body">
+        <p class="note" id="runsLine">…</p>
+        <div id="runsBox"></div>
+        <p class="note">У такого чата страница может писать «Message delivery timed out» и показывать текст «с начала»: работа при этом идёт на сервере. Кнопку Retry не нажимайте: можно запустить прогон повторно.</p>
+      </div>
+    </details>
 
-  <section>
-    <h2>Идут фоновые прогоны <small>работа идёт на сервере</small></h2>
-    <p class="note" id="runsLine">…</p>
-    <div id="runsBox"></div>
-    <p class="note">Для таких чатов страница может писать «Message delivery timed out» и показывать текст «с начала»: работа при этом идёт. Кнопку «Retry» не нажимайте: можно запустить прогон повторно.</p>
-  </section>
+    <details class="sec" id="secReaper">
+      <summary><span class="s-title">Зависшие ответы</span><span id="reaperSum" class="s-sum"></span></summary>
+      <div class="s-body">
+        <div class="row between">
+          <p class="note" id="reaperLine" style="margin:0">…</p>
+          <button id="btnReaper" class="small ghost" title="Пройти по всем вашим чатам прямо сейчас">Проверить сейчас</button>
+        </div>
+        <div id="reaperLog"></div>
+        <label class="chk"><input type="checkbox" id="chkReaper"> Сам находить и останавливать зависшие ответы: сервер пишет ответ, а сам чат не менялся 15 минут, и это подтвердилось повторной проверкой</label>
+      </div>
+    </details>
 
-  <section>
-    <div class="row between">
-      <h2>Зависшие потоки аккаунта</h2>
-      <button id="btnReaper" class="small" title="Пройти по всем вашим чатам прямо сейчас">Проверить сейчас</button>
-    </div>
-    <p class="note" id="reaperLine">…</p>
-    <div id="reaperLog"></div>
-    <label class="chk"><input type="checkbox" id="chkReaper"> Сам находить и останавливать зависшие потоки (IS_STREAMING, update_time не меняется ≥ 30 мин и подтверждено повторной проверкой)</label>
-  </section>
+    <section id="hibSec" hidden>
+      <h2>Усыплены из-за цикла <span class="count">вкладки остались на месте</span></h2>
+      <div id="hibBox"></div>
+      <p class="note">Эти вкладки слали десятки запросов с отказом и держали блокировку всего аккаунта. Кликните по вкладке, чтобы загрузить её заново, лучше когда лимит зелёный.</p>
+    </section>
 
-  <section>
-    <h2>Сессия</h2>
-    <div class="actions">
-      <button id="btnSave">Сохранить открытые чаты</button>
-      <button id="btnCancel" class="ghost">Остановить восстановление</button>
-    </div>
-    <div id="sessions"></div>
-    <div class="row">
-      <label>пауза между вкладками, с <input id="gap" type="number" min="3" max="120" step="1"></label>
-    </div>
-  </section>
+    <details class="sec" id="secSession">
+      <summary><span class="s-title">Сессия</span><span id="sessSum" class="s-sum"></span></summary>
+      <div class="s-body">
+        <div class="actions">
+          <button id="btnSave" class="small">Сохранить открытые чаты</button>
+          <button id="btnCancel" class="small ghost">Остановить восстановление</button>
+        </div>
+        <div id="sessions"></div>
+        <div class="row"><label class="inline">пауза между вкладками, с <input id="gap" type="number" min="3" max="120" step="1"></label></div>
+      </div>
+    </details>
 
-  <section>
-    <h2>Настройки</h2>
-    <label class="chk"><input type="checkbox" id="chkEnabled"> Защита страниц включена (pacing + удержание при 429)</label>
-    <label class="chk"><input type="checkbox" id="chkAutoStop"> Авто-стоп зависших потоков (≥45 мин IS_STREAMING и resume не работает) — по умолчанию выключено</label>
-    <label class="chk"><input type="checkbox" id="chkHeal"> Оживлять вкладки с «Could not load…» (по одной, когда лимит спокоен)</label>
-    <div class="actions"><button id="btnReset" class="ghost">Забыть выученные пороги</button></div>
-    <div class="actions"><button id="btnPanelSide" class="ghost" title="Откроет chrome://settings/appearance">Сторона боковой панели: настройки Chrome</button></div>
-    <p class="note">Слева или справа боковая панель — это настройка самого Chrome (Внешний вид → Положение боковой панели), расширение её не переключает. Для выбора стороны используйте окна «слева» / «справа».</p>
-    <p class="note">Пороги со знаком «~» — предположение, пока не пойман реальный 429. После 429 расширение запоминает, сколько запросов за 10 с было допустимо, и ужимает pacing.</p>
-  </section>
+    <details class="sec" id="secJournal">
+      <summary><span class="s-title">Журнал событий</span><span class="s-sum">что реально происходило, переживает перезапуск</span></summary>
+      <div class="s-body"><pre id="jrBox" class="mono-log"></pre></div>
+    </details>
+
+    <details class="sec" id="secSettings">
+      <summary><span class="s-title">Настройки</span></summary>
+      <div class="s-body">
+        <label class="chk"><input type="checkbox" id="chkEnabled"> Защита страниц включена: общий темп запросов и удержание при отказе сервера</label>
+        <label class="chk"><input type="checkbox" id="chkHeal"> Оживлять вкладки с «Could not load…» по одной, когда сервер спокоен</label>
+        <label class="chk"><input type="checkbox" id="chkAutoStop"> Остановка долгих ответов по старому правилу: ответ идёт 45 минут и больше, а возобновить его не удаётся (выключено по умолчанию)</label>
+        <div class="actions">
+          <button id="btnReset" class="small ghost">Забыть выученные пороги</button>
+          <button id="btnPanelSide" class="small ghost" title="Откроет chrome://settings/appearance">Сторона боковой панели</button>
+        </div>
+        <p class="note">Сторона боковой панели задаётся самим Chrome (Внешний вид → Положение боковой панели). Для выбора стороны используйте окна ◧ и ◨ вверху.</p>
+        <p class="note">Пороги со знаком «~» пока предположение. После отказа сервера расширение запоминает, сколько запросов за 10 с было допустимо, и подстраивает темп.</p>
+      </div>
+    </details>
+  </main>
 
   <script src="shared.js"></script>
   <script src="popup.js"></script>

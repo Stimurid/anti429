@@ -228,7 +228,12 @@
   // saying IS_STREAMING. So: IS_STREAMING + the SAME update_time at two checks >= confirmMs apart + idle >= idleMs.
   // (resume 404 is NOT used: it also answers 404 for finished chats and for live runs nobody can attach to.)
   // prev: { status, updMs, since } | null ; cur: { status, updMs, generatingTab } ; returns { action, reason, rec }
-  const REAPER_DEFAULTS = { idleMs: 30 * 60000, confirmMs: 10 * 60000 };
+  // visibleIdleMs: a chat that is open in a tab showing 'generating' is protected (the owner may be watching a live answer),
+  // but ONLY while its update_time still moves or is younger than this: a live run updates update_time about once a minute,
+  // a frozen one (seen 2026-10-25: 76 min, page stuck on 'Connection interrupted') must not be protected forever.
+  // Owner's rule (2026-10-25): a chat whose update_time did not move for 15 minutes is stuck, even in a visible tab:
+  // a live run (tools included) practically never goes quiet for that long.
+  const REAPER_DEFAULTS = { idleMs: 15 * 60000, confirmMs: 5 * 60000, visibleIdleMs: 15 * 60000 };
   function reaperVerdict(prev, cur, now, cfg) {
     const c = Object.assign({}, REAPER_DEFAULTS, cfg || {});
     const out = (action, reason, rec) => ({ action, reason, rec: rec || null });
@@ -240,7 +245,7 @@
     if (!Number.isFinite(cur.updMs) || cur.updMs <= 0) return out("watch", "no-update-time", { status: cur.status, updMs: 0, since: now });
     const same = !!(prev && prev.status === "IS_STREAMING" && prev.updMs === cur.updMs);
     const rec = { status: cur.status, updMs: cur.updMs, since: same ? prev.since : now };
-    if (cur.generatingTab) return out("watch", "visible-generation", { status: cur.status, updMs: cur.updMs, since: now });
+    if (cur.generatingTab && now - cur.updMs < c.visibleIdleMs) return out("watch", "visible-generation", { status: cur.status, updMs: cur.updMs, since: same ? prev.since : now });
     if (now - cur.updMs < c.idleMs) return out("watch", "recently-active", rec);
     if (!same) return out("watch", "first-sight", rec);
     if (now - rec.since < c.confirmMs) return out("watch", "confirming", rec);

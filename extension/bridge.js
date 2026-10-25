@@ -195,6 +195,24 @@
         })();
         return true; // async response
       }
+      if (msg && msg.type === "a429_chatstatus" && sender.id === chrome.runtime.id) {
+        // ONE read-only request: what does the server say about THIS tab's chat right now (the same stream_status the page uses).
+        (async () => {
+          const m = msg.conv ? [null, msg.conv] : location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
+          if (!m) return sendResponse({ ok: false, reason: "no-conversation-in-url" });
+          try {
+            const sess = await (await fetch("/api/auth/session", { credentials: "include" })).json();
+            if (!sess || !sess.accessToken) return sendResponse({ ok: false, reason: "no-session" });
+            const r = await fetch("/backend-api/conversation/" + m[1] + "/stream_status", {
+              credentials: "include", headers: { Authorization: "Bearer " + sess.accessToken }
+            });
+            let body = null;
+            try { body = await r.json(); } catch {}
+            sendResponse({ ok: r.ok, http: r.status, status: body && body.status || null, retryAfter: r.headers.get("retry-after") });
+          } catch (e) { sendResponse({ ok: false, reason: "network" }); }
+        })();
+        return true; // async response
+      }
       if (msg && msg.type === "a429_markdead" && sender.id === chrome.runtime.id) {
         const m = location.pathname.match(/\/c\/([0-9a-fA-F-]{36})/);
         if (!m) { sendResponse({ ok: false, reason: "no-conversation-in-url" }); return; }

@@ -205,8 +205,8 @@ test("reaperVerdict: completed / stop-requested / other states / visible generat
   assert.equal(A.reaperVerdict({ status: "IS_STREAMING", updMs: 1, since: 1 }, { status: "COMPLETE", updMs: 1 }, now, cfg).action, "clear");
   assert.equal(A.reaperVerdict(null, { status: "IS_STOP_REQUESTED", updMs: now }, now, cfg).action, "stopping");
   assert.equal(A.reaperVerdict(null, { status: "WHATEVER", updMs: 1 }, now, cfg).action, "clear");
-  const gen = A.reaperVerdict({ status: "IS_STREAMING", updMs: 5, since: 1 }, { status: "IS_STREAMING", updMs: 5, generatingTab: true }, now, cfg);
-  assert.equal(gen.action, "watch"); assert.equal(gen.reason, "visible-generation");
+  const gen = A.reaperVerdict({ status: "IS_STREAMING", updMs: now - 5 * 60000, since: 1 }, { status: "IS_STREAMING", updMs: now - 5 * 60000, generatingTab: true }, now, Object.assign({ visibleIdleMs: 60 * 60000 }, cfg));
+  assert.equal(gen.action, "watch"); assert.equal(gen.reason, "visible-generation", "a live answer in a visible tab is protected");
   const unk = A.reaperVerdict({ status: "IS_STREAMING", updMs: 0, since: 1 }, { status: "IS_STREAMING", updMs: 0 }, now, cfg);
   assert.equal(unk.action, "watch"); assert.equal(unk.reason, "no-update-time", "never stops without a known update_time");
 });
@@ -291,4 +291,19 @@ test("restartPick: one tab at a time, only when calm, after the pause, oldest du
   assert.equal(A.restartPick(q, { now, calm: true, pausedUntil: now + 1000 }), null, "global heal pause");
   assert.equal(A.restartPick(q, { now, calm: true, lastRestartAt: now - 5000 }), null, "25 s spacing between restarts");
   assert.equal(A.restartPick([{ id: 9, dueAt: now + 60000 }], { now, calm: true }), null, "not due yet");
+});
+
+test("reaperVerdict: an open tab that still says 'generating' is NOT protected forever once update_time is frozen (15 min by the owner's rule)", () => {
+  const now = 100 * 3600000, cfg = {};   // the real defaults: 15 min idle, 5 min confirm, 15 min for a visible tab
+  const frozen = { status: "IS_STREAMING", updMs: now - 76 * 60000, generatingTab: true };
+  const first = A.reaperVerdict(null, frozen, now, cfg);
+  assert.equal(first.reason, "first-sight", "76 min frozen, tab shows generating: now it is watched, not protected");
+  const second = A.reaperVerdict(first.rec, frozen, now + 2 * 60000, cfg);
+  assert.equal(second.reason, "confirming");
+  const third = A.reaperVerdict(first.rec, frozen, now + 6 * 60000, cfg);
+  assert.equal(third.action, "stop");
+  const young = A.reaperVerdict(first.rec, { status: "IS_STREAMING", updMs: now - 10 * 60000, generatingTab: true }, now, cfg);
+  assert.equal(young.reason, "visible-generation", "10 min without update in a visible generating tab is still protected");
+  const edge = A.reaperVerdict(null, { status: "IS_STREAMING", updMs: now - 16 * 60000, generatingTab: true }, now, cfg);
+  assert.equal(edge.reason, "first-sight", "16 min of silence: no longer protected");
 });

@@ -192,7 +192,16 @@ try {
   const pt = await dbg(`/json/new?${encodeURIComponent(`chrome-extension://${extId}/popup.html`)}`, "PUT");
   const pop = await cdp(pt.webSocketDebuggerUrl);
   await pop.send("Runtime.enable");
-  const call = msg => ev(pop, `chrome.runtime.sendMessage(${JSON.stringify(msg)})`);
+  for (let i = 0; i < 30; i++) { try { if (await ev(pop, "!!(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage)")) break; } catch {} await sleep(500); } // the popup page can still be navigating right after loadUnpacked
+  // the worker can be restarted by Chrome between two calls (idle timeout, memory pressure); a real caller would simply ask again
+  const call = async msg => {
+    for (let k = 0; ; k++) {
+      // a hung call must fail the run, not freeze it (2026-10-25: the run stopped forever at "discard")
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error(`call timeout 30 s: ${msg.type}`)), 30000));
+      try { return await Promise.race([ev(pop, `chrome.runtime.sendMessage(${JSON.stringify(msg)})`), timeout]); }
+      catch (e) { if (k >= 3 || !/message channel closed|Receiving end does not exist|Extension context invalidated|call timeout/i.test(String(e && e.message || e))) throw e; await sleep(1500); }
+    }
+  };
   const snap = () => call({ type: "snapshot" });
   const openTab = async url => (await dbg(`/json/new?${encodeURIComponent(url)}`, "PUT"));
   const tabsList = () => ev(pop, `chrome.tabs.query({url:'https://chatgpt.com/*'}).then(t=>t.map(x=>({id:x.id,url:x.url,discarded:x.discarded,title:x.title})))`);
@@ -215,9 +224,13 @@ try {
   await sleep(1500);
   await resetMock();
   const bt = await openTab("https://chatgpt.com/c/burst1?burst=1");
-  await sleep(3500);
-  let s = await snap();
-  const det = s.fams.find(f => f.id === "detail");
+  // poll instead of a fixed 3.5 s sleep: on a loaded machine the short cooldown could expire before the snapshot (2026-10-25)
+  let s, det;
+  for (let i = 0; i < 40; i++) {
+    s = await snap(); det = s.fams.find(f => f.id === "detail");
+    if (det.c429_10m >= 1 && det.learned && det.cooling) break;
+    await sleep(250);
+  }
   check("burst without guard produced real 429s that the extension observed", det.c429_10m >= 1, { c429_10m: det.c429_10m });
   check("extension LEARNED the real ceiling (3) instead of the assumed 4", det.learned && det.ceil === 3, { ceil: det.ceil, learned: det.learned, ep: det.ep });
   check("traffic light is red during the cooldown", det.cooling && s.overall === "red", { overall: s.overall, cooldownMs: det.cooldownMs });
@@ -554,6 +567,21 @@ try {
   check("restart: the tab is back (same address) and not discarded", rsRow && !rsRow.discarded, rsRow);
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await call({ type: "setCfg", patch: { calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1 } });
+
+  // 14d) 'What does the server say?': ONE read-only stream_status request for the tab's chat
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await sleep(1500);
+  await resetMock();
+  lim.convs = [{ id: "cccccccc-0000-4000-8000-00000000c001", title: "status probe", status: "IS_STREAMING", live: true }];
+  await openTab("https://chatgpt.com/c/cccccccc-0000-4000-8000-00000000c001");
+  await sleep(4000);
+  const csTab = (await tabsList()).find(t => t.url.includes("cccccccc-0000"));
+  const cs1 = await call({ type: "chatStatus", id: csTab.id });
+  check("chat status: IS_STREAMING is reported for a chat the server is still writing", cs1 && cs1.ok === true && cs1.status === "IS_STREAMING", cs1);
+  lim.convs[0].status = "COMPLETE"; lim.convs[0].live = false;
+  const cs2 = await call({ type: "chatStatus", id: csTab.id });
+  check("chat status: COMPLETE is reported once it finished", cs2 && cs2.ok === true && cs2.status === "COMPLETE", cs2);
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
 
   // 14c) the 'evil' server (accumulating penalty): a client that retries at Retry-After never gets in. The escalating heal
   //      pause must space the attempts out until the required silence is reached, then the tab heals by itself.
