@@ -106,6 +106,7 @@ const ready = (async () => {
 // ---------- journal: what actually happened, kept across restarts (so an incident can be explained afterwards) ----------
 let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
 let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
+const RE = {};    // tabId -> the page shows "This response couldn't load" (journaled once per appearance)
 const HB = {};    // tabId -> timestamps of automatic heals (the budget)
 const HF = { streak: 0, until: 0, last: 0 };
 // The escalating heal pause must survive worker restarts and extension reloads: kept only in memory it fell back to
@@ -161,14 +162,16 @@ async function journalTick(now) {
   for (const id of A.FAMILY_IDS) { const n = A.countIn(F[id].starts, now, 60000); if (n) fam[id] = n; }
   const top = Object.entries(T).map(([id, s]) => [id, s.req.length, s.c429.length]).filter(x => x[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 3);
   const held = Object.values(H).reduce((a, n) => a + (n || 0), 0);
-  if (!Object.keys(fam).length && !LOADS && !held && !Object.keys(OTHER).length) return;
+  const errs = Object.entries(ERRS).filter(([, n]) => n > 1).map(([k, n]) => [k, n]).slice(0, 6);
+  ERRS = {};
+  if (!Object.keys(fam).length && !LOADS && !held && !Object.keys(OTHER).length && !errs.length) return;
   const topT = [];
   for (const [id, req, c] of top) {
     let t = ""; try { t = ((await chrome.tabs.get(Number(id))).title || "").slice(0, 28); } catch {}
     topT.push({ tab: Number(id), req, c429: c, t });
   }
   const other = Object.entries(OTHER).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  jr("min", { fam, loads: LOADS, held, top: topT, other });
+  jr("min", Object.assign({ fam, loads: LOADS, held, top: topT, other }, errs.length ? { errs } : {}));
   LOADS = 0; OTHER = {};
 }
 
@@ -204,6 +207,25 @@ const header = (headers, name) => {
   return h ? h.value : null;
 };
 
+// Errors other than 429 (2026-10-25: "This response couldn't load" with no 429 in the journal; the cause was invisible).
+// The first error of a kind (status/error + path + tab) in a minute goes to the journal; repeats are only counted
+// and shown in the minute summary. Cancelled requests (navigation, closed tab, stopped answer) are not errors.
+let ERRS = {};
+function logErr(details, u, what, fam) {
+  if (reaperAuditing && (fam === "list" || fam === "stream")) return;
+  const tab = details.tabId >= 0 ? details.tabId : null;
+  const k = what + " " + details.method + " " + normPath(u.pathname) + " " + (tab == null ? "-" : tab);
+  if (ERRS[k]) { ERRS[k]++; return; }
+  ERRS[k] = 1;
+  jr("err", { what, m: details.method, p: normPath(u.pathname), fam: fam || null, tab });
+}
+chrome.webRequest.onErrorOccurred.addListener(details => {
+  if (details.error === "net::ERR_ABORTED" || details.error === "net::ERR_BLOCKED_BY_CLIENT") return;
+  const u = parseUrl(details.url);
+  if (!u) return;
+  logErr(details, u, details.error || "net error", A.classify(details.method, u.pathname));
+}, { urls: URLS });
+
 chrome.webRequest.onBeforeRequest.addListener(details => {
   const u = parseUrl(details.url);
   if (!u) return;
@@ -235,6 +257,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     const len = Number(header(details.responseHeaders, "content-length"));
     if (Number.isFinite(len) && len > 0) tabStats(details.tabId).bytes.push({ ts: now, b: len });
   }
+  if (details.statusCode >= 400 && details.statusCode !== 429) logErr(details, u, "http " + details.statusCode, fam);
   if (!fam) return;
   if (details.statusCode !== 429) {
     if (details.statusCode < 400) {
@@ -824,6 +847,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating };
           // the page itself shows the error block (e.g. it was already stuck when the extension started)
           if (msg.state.banner && !B[id]) B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() - 5000, status: 429, seenOnPage: true };
+          if (msg.state.respErr && !(RE[id])) jr("ui-error", { tab: id, what: "response-couldnt-load", title: String(sender.tab.title || "").slice(0, 40) });
+          RE[id] = !!msg.state.respErr;
           persistSoon();
         }
         return sendResponse({ ok: true });

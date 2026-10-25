@@ -210,6 +210,9 @@ function renderJournal() {
     if (e.e === "hib") return `${hh(e.t)} вкладка ${e.tab} усыплена (отказов: ${e.n})`;
     if (e.e === "heal") return `${hh(e.t)} оживляю вкладку ${e.tab}${e.manual ? " (вручную)" : ""}, попытка ${e.n}`;
     if (e.e === "restart-queued") return `${hh(e.t)} вкладка ${e.tab} поставлена в очередь на перезапуск (${e.why})`;
+    if (e.e === "err") return `${hh(e.t)} ошибка: ${e.what} · ${e.m} ${e.p}${e.tab != null ? " · вкладка " + e.tab : ""}`;
+    if (e.e === "ui-error") return `${hh(e.t)} на странице «This response couldn't load» · вкладка ${e.tab}${e.title ? " «" + e.title + "»" : ""}`;
+    if (e.e === "hot-hold") return `${hh(e.t)} сервер отказывает подряд (${e.streak}): запросы «${e.fam}» придержаны на ${e.min} мин`;
     if (e.e === "restart") return `${hh(e.t)} вкладка ${e.tab} перезапущена`;
     return `${hh(e.t)} ${e.e}`;
   };

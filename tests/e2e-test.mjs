@@ -578,6 +578,25 @@ try {
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await call({ type: "setCfg", patch: { calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1 } });
 
+  // 14e) errors other than 429 are journaled: a server error (here the mock's 404) and the page's own
+  //      "This response couldn't load" block (2026-10-25: such a failure left no trace in the journal)
+  await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
+  await sleep(1000);
+  await resetMock();
+  await openTab("https://chatgpt.com/c/errlog1");
+  await sleep(3000);
+  const errTab = (await tabsList()).find(t => t.url.includes("errlog1"));
+  await ev(pop, `chrome.tabs.update(${errTab.id},{active:true}).then(()=>chrome.scripting.executeScript({target:{tabId:${errTab.id}},world:"MAIN",func:()=>{fetch('/backend-api/no-such-endpoint').catch(()=>{});const m=document.querySelector('main')||document.body;const d=document.createElement('div');d.textContent="This response couldn't load. Please try again.";m.appendChild(d);}}))`);
+  let errJ = [], uiJ = [];
+  for (let i = 0; i < 30 && !(errJ.length && uiJ.length); i++) {
+    await sleep(1000);
+    const j = (await snap()).journal || [];
+    errJ = j.filter(e => e.e === "err" && /no-such-endpoint/.test(e.p || ""));
+    uiJ = j.filter(e => e.e === "ui-error" && e.tab === errTab.id);
+  }
+  check("a server error other than 429 is written to the journal (status, path, tab)", errJ.length === 1 && errJ[0].what === "http 404" && errJ[0].tab === errTab.id, errJ);
+  check("the page's 'This response couldn't load' block is written to the journal with its tab", uiJ.length === 1 && typeof uiJ[0].t === "number", uiJ);
+
   // 14d) 'What does the server say?': ONE read-only stream_status request for the tab's chat
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
   await sleep(1500);
