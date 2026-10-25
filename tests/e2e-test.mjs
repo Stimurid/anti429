@@ -596,7 +596,7 @@ try {
   // 14c) the 'evil' server (accumulating penalty): a client that retries at Retry-After never gets in. The escalating heal
   //      pause must space the attempts out until the required silence is reached, then the tab heals by itself.
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 500, calmPer429Ms: 0, healPauseScale: 0.01, healGapMs: 500, healBackoffScale: 0.01, autoHeal: true, hibernate: false, notifyStorm: false, hotHoldScale: 0.005 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 1500, timeScale: 0.05, calmMs: 500, calmPer429Ms: 0, healPauseScale: 0.01, healGapMs: 500, healBackoffScale: 0.01, autoHeal: true, hibernate: false, notifyStorm: false, hotHoldScale: 0.005, hotBurstMs: 200 } });
   await call({ type: "resetHealPause" });
   await sleep(1500);
   await resetMock();
@@ -613,7 +613,7 @@ try {
   const hotJ = ((await snap()).journal || []).filter(e => e.e === "hot-hold");
   check("evil server: refusals in a row with nothing accepted made the family hold longer (hot-hold)", hotJ.length >= 1, hotJ.slice(-3));
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
-  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1, hibernate: true, hotHoldScale: 0 } });
+  await call({ type: "setCfg", patch: { holdMaxMs: 300000, timeScale: 1, calmMs: 30000, calmPer429Ms: 20000, healPauseScale: 1, healGapMs: 15000, healBackoffScale: 1, hibernate: true, hotHoldScale: 0, hotBurstMs: 20000 } });
   await call({ type: "resetHealPause" });
 
   // 14b) a looping tab (page-side retry loop, 429 after 429) is put to sleep by itself once it is not the active tab

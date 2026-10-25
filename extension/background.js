@@ -38,6 +38,7 @@ const DEFAULT_CFG = {
   healBackoffScale: 1,    // multiplies the per-tab retry spacing (test hook)
   healPauseScale: 1,      // multiplies the global pause after a failed heal (test hook)
   hotHoldScale: 1,        // multiplies the longer hold after refusals in a row with nothing accepted (test hook)
+  hotBurstMs: 20000,      // refusals closer than this count as one burst for the longer hold
   notifyStorm: true       // desktop notification when 3+ ChatGPT tabs are opened within 3 minutes
 };
 
@@ -238,7 +239,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   if (details.statusCode !== 429) {
     if (details.statusCode < 400) {
       const fo = F[fam];
-      fo.hot = 0; // the server accepts again: the penalty is over
+      fo.hot = 0; fo.hotAt = 0; // the server accepts again: the penalty is over
       (fo.oks || (fo.oks = [])).push(now);
       // An accepted reply that lands inside a 429 episode (rejections are usually faster than accepted answers)
       // raises the evidence for this episode; re-evaluate the ceiling from the episode maximum.
@@ -279,8 +280,12 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     saveHeal();
   }
   jr("429", { fam, tab: details.tabId, ra: ra ? Math.round(ra / 1000) : null, acc: observed, n10: f.c429.length, tabReq60: details.tabId >= 0 ? A.countIn(tabStats(details.tabId).req, now, 60000) : null });
-  f.hot = observed === 0 ? (f.hot || 0) + 1 : 0;
-  const hotHold = A.hotHoldMs(f.hot) * (cfg.hotHoldScale == null ? 1 : cfg.hotHoldScale);
+  // A burst of refusals within seconds is ONE refusal: count again only when the server refuses after a pause
+  // (2026-10-25: six list refusals in 7 s from one fresh tab gave a 15-minute hold).
+  const hotPrev = f.hot || 0;
+  if (observed !== 0) f.hot = 0;
+  else if (!f.hotAt || now - f.hotAt > (cfg.hotBurstMs == null ? 20000 : cfg.hotBurstMs)) { f.hot = hotPrev + 1; f.hotAt = now; }
+  const hotHold = f.hot > hotPrev ? A.hotHoldMs(f.hot) * (cfg.hotHoldScale == null ? 1 : cfg.hotHoldScale) : 0;
   if (hotHold) jr("hot-hold", { fam, streak: f.hot, min: Math.round(hotHold / 60000) });
   f.cd = Math.max(f.cd, now + Math.max(ra || 15000, hotHold));
   if (details.tabId >= 0) tabStats(details.tabId).c429.push(now);
