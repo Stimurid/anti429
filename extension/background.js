@@ -65,7 +65,7 @@ const tabStats = id => (T[id] || (T[id] = { req: [], fam: {}, bytes: [], c429: [
 
 const ready = (async () => {
   const [local, session] = await Promise.all([
-    chrome.storage.local.get(["cfg", "ceilings", "learned", "schema"]),
+    chrome.storage.local.get(["cfg", "ceilings", "learned", "schema", "healState"]),
     chrome.storage.session.get(["state"]).catch(() => ({}))
   ]);
   if (local.cfg) cfg = Object.assign({}, DEFAULT_CFG, local.cfg);
@@ -74,6 +74,11 @@ const ready = (async () => {
   // same for the previous reaper thresholds (30 min idle, 10 min confirm): the owner wants 15 and 5
   if (cfg.reaperIdleMs === 30 * 60000) cfg.reaperIdleMs = DEFAULT_CFG.reaperIdleMs;
   if (cfg.reaperConfirmMs === 10 * 60000) cfg.reaperConfirmMs = DEFAULT_CFG.reaperConfirmMs;
+  if (local.healState) {
+    Object.assign(HF, local.healState.HF || {});
+    lastHealAny = Math.max(lastHealAny, local.healState.lastHealAny || 0);
+    Object.assign(HB, local.healState.HB || {});
+  }
   if (local.ceilings) ceilings = Object.assign({}, A.DEFAULT_CEIL, local.ceilings);
   if (local.learned) for (const id of A.FAMILY_IDS) F[id].learned = !!local.learned[id];
   const s = session && session.state;
@@ -101,6 +106,9 @@ let JR = [], jrDirty = false, LOADS = 0, lastJrMin = Date.now();
 let OTHER = {};   // path pattern -> count since the last journal line: backend-api traffic that is NOT one of the limiter families
 const HB = {};    // tabId -> timestamps of automatic heals (the budget)
 const HF = { streak: 0, until: 0, last: 0 };
+// The escalating heal pause must survive worker restarts and extension reloads: kept only in memory it fell back to
+// 2 minutes every time Chrome put the worker to sleep, and the heals kept poking a server in penalty (2026-10-25).
+function saveHeal() { chrome.storage.local.set({ healState: { HF, lastHealAny, HB } }).catch(() => {}); }
 const RQ = [];    // restart queue [{ id, dueAt, why }]: tabs to reload by themselves once the limiter is calm
 let lastRestartAt = 0;
 const HRB = {};   // tabId -> time of the last automatic restart after hibernation (once per hour)
@@ -261,6 +269,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     HF.last = now; HF.streak++;
     HF.until = now + A.healPauseMs(HF.streak) * (cfg.healPauseScale == null ? 1 : cfg.healPauseScale);
     jr("heal-pause", { streak: HF.streak, min: Math.round(A.healPauseMs(HF.streak) / 60000) });
+    saveHeal();
   }
   jr("429", { fam, tab: details.tabId, ra: ra ? Math.round(ra / 1000) : null, acc: observed, n10: f.c429.length, tabReq60: details.tabId >= 0 ? A.countIn(tabStats(details.tabId).req, now, 60000) : null });
   f.cd = Math.max(f.cd, now + (ra || 15000));
@@ -585,7 +594,7 @@ async function healTab(id, manual) {
   const b = B[id] || (B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() });
   b.heals = (b.heals || 0) + 1;
   b.lastHealAt = Date.now();
-  if (!manual) { lastHealAny = Date.now(); (HB[id] = (HB[id] || []).filter(t => Date.now() - t < 20 * 60000)).push(Date.now()); }
+  if (!manual) { lastHealAny = Date.now(); (HB[id] = (HB[id] || []).filter(t => Date.now() - t < 20 * 60000)).push(Date.now()); saveHeal(); }
   let res = null;
   jr("heal", { tab: id, manual: !!manual, n: b.heals });
   try { res = await chrome.tabs.sendMessage(id, { type: "a429_heal" }); } catch {}
@@ -783,7 +792,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           else if (msg.ev.type === "resume-recovery-success") R[id] = (R[id] || 0) + 1;
           else if (msg.ev.type === "history-failed") {
             if (A.isHealableStatus(msg.ev.status)) B[id] = Object.assign({ heals: 0, lastHealAt: 0 }, B[id], { failedAt: Date.now(), status: msg.ev.status });
-          } else if (msg.ev.type === "history-ok") { delete B[id]; HF.streak = 0; HF.until = 0; }
+          } else if (msg.ev.type === "history-ok") { delete B[id]; if (HF.streak || HF.until) { HF.streak = 0; HF.until = 0; saveHeal(); } }
           else if (msg.ev.type === "dead-stream") D[id] = Date.now();
           else if (msg.ev.type === "stream-status") {
             const st = msg.ev.status;
@@ -855,7 +864,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
-      case "resetHealPause": HF.streak = 0; HF.until = 0; return sendResponse({ ok: true }); // test hook
+      case "resetHealPause": HF.streak = 0; HF.until = 0; saveHeal(); return sendResponse({ ok: true }); // test hook
       case "chatStatus": {
         let r = null;
         try { r = await chrome.tabs.sendMessage(msg.id, { type: "a429_chatstatus" }); } catch {}
