@@ -47,7 +47,7 @@ function tabState(t) {
   const run = snap.reaper && snap.reaper.runs.find(x => x.id === convOf(t.url));
   const hot = s.c429_10 >= (snap.cfg.hibernate429 || 40);
   const extras = [];
-  if (s.generating) extras.push("идёт ответ");
+  if (s.generating && !(s.interrupted >= 0)) extras.push("идёт ответ");
   if (s.draft) extras.push("в поле ввода есть неотправленный текст");
   if (s.held) extras.push(`запросов придержано: ${s.held}`);
   if (s.recovered) extras.push(`поток восстановлен ${s.recovered} раз`);
@@ -59,6 +59,7 @@ function tabState(t) {
   if (s.broken) return bad(`Страница не загрузилась (сервер ответил ${s.broken.status}). Расширение попробует снова, когда сервер спокоен${s.broken.heals ? `; попыток: ${s.broken.heals}` : ""}.`, { label: "Повторить", act: "heal" });
   if (s.loop || hot) return bad(`Слишком часто стучится на сервер: ${s.req60} запросов в минуту${hot ? `, отказов за 10 минут: ${s.c429_10}` : ""}. Лучше перезапустить.`, { label: "Перезапустить", act: "restart" });
   if (s.deadStream) return warn("Ответ завис на сервере. Расширение сказало странице, что он закончился, чтобы она не долбила сервер. Снимется само через 20 минут.", { label: "Снять", act: "undead" });
+  if (s.interrupted >= 0) return warn(`Связь с ответом оборвалась${s.interrupted ? " " + s.interrupted + " мин назад" : ""} («Connection interrupted»): кнопка остановки видна, но ответ не приходит. Спросите сервер: если ответ готов, обновите вкладку; если ещё пишется, подождите.`, { label: "Что на сервере?", act: "status" });
   if (s.streaming >= 10) return warn(`Сервер уже ${s.streaming} мин пишет ответ. Если чат давно не менялся, он завис: спросите сервер кнопкой «Что на сервере?».`, { label: "Что на сервере?", act: "status" });
   if (s.stopReq >= 0) return warn("Остановка принята, сервер заканчивает работу. Подождите несколько минут.", null);
   if (run && run.state !== "live") return warn("Фоновая работа давно не обновлялась: возможно, она остановилась.", { label: "Что на сервере?", act: "status" });
@@ -113,6 +114,7 @@ function card(x, calm) {
   const cardEl = el("div", { class: `tab sev-${x.sev}${x.sleeping ? " disc" : ""}${here ? " cur" : ""}${calm ? " calm" : ""}` });
   const title = el("div", { class: "t", title: t.title || t.url, onclick: () => send({ type: "focus", id: t.id }) });
   if (here) title.append(el("span", { class: "here", text: "вы здесь" }));
+  if (s.project) title.append(el("span", { class: "proj", text: s.project, title: "проект" }));
   title.append(tabLabel(t));
   cardEl.append(title);
   cardEl.append(el("div", { class: "st" }, x.text, x.extra ? el("span", { class: "dim", text: "  ·  " + x.extra }) : null));

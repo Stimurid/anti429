@@ -376,6 +376,8 @@ function snapshot() {
     const t = tabs[id] || (tabs[id] = { req60: 0, fam60: {}, mb10: 0, c429_10: 0, held: 0, loop: false });
     t.draft = !!(P[id] && P[id].draft);
     t.generating = !!(P[id] && P[id].generating);
+    t.project = (P[id] && P[id].project) || "";
+    t.interrupted = P[id] && P[id].interruptedSince ? Math.floor((now - P[id].interruptedSince) / 60000) : -1;
     t.guard = !!G[id];
     t.recovered = R[id] || 0;
     t.deadStream = D[id] ? Math.round((now - D[id]) / 1000) : 0;
@@ -844,7 +846,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "a429_tabstate": {
         const id = sender.tab && sender.tab.id;
         if (id != null && msg.state) {
-          P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating };
+          const was = P[id] || {};
+          P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating, project: String(msg.state.project || "").slice(0, 60),
+            interruptedSince: msg.state.interrupted ? (was.interruptedSince || Date.now()) : 0 };
+          if (msg.state.interrupted && !was.interruptedSince) jr("ui-error", { tab: id, what: "connection-interrupted", title: String(sender.tab.title || "").slice(0, 40) });
           // the page itself shows the error block (e.g. it was already stuck when the extension started)
           if (msg.state.banner && !B[id]) B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() - 5000, status: 429, seenOnPage: true };
           if (msg.state.respErr && !(RE[id])) jr("ui-error", { tab: id, what: "response-couldnt-load", title: String(sender.tab.title || "").slice(0, 40) });
@@ -904,7 +909,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
-      case "resetHealPause": HF.streak = 0; HF.until = 0; saveHeal(); return sendResponse({ ok: true }); // test hook
+      case "resetHealPause": HF.streak = 0; HF.until = 0; saveHeal(); for (const f of A.FAMILY_IDS) { F[f].oks = []; F[f].hot = 0; F[f].hotAt = 0; } return sendResponse({ ok: true }); // test hook
       case "chatStatus": {
         let r = null;
         try { r = await chrome.tabs.sendMessage(msg.id, { type: "a429_chatstatus" }); } catch {}

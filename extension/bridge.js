@@ -63,7 +63,23 @@
   // "This response couldn't load" under an answer: only journaled (the cause is looked up in the request errors);
   // nothing is clicked. Same cheap scan as the banner, visible tabs only.
   const RESP_ERR = /this response couldn.t load|couldn.t load this response|не удалось загрузить (этот )?ответ/i;
-  let lastRespErr = false, lastRespAt = 0;
+  // "Connection interrupted. Waiting for the complete answer": the stop button stays, but the answer no longer arrives.
+  const INTERRUPTED = /connection interrupted|waiting for the complete answer|соединение прервано|ожидание полного ответа/i;
+  let lastRespErr = false, lastRespAt = 0, lastInterrupted = false;
+  // The project of this chat, by the name ChatGPT itself shows in its links to the project (no request is made).
+  const projectName = () => {
+    const m = location.pathname.match(/^\/g\/(g-p-[0-9a-f]+)/i);
+    if (!m) return "";
+    try {
+      for (const a of document.querySelectorAll('a[href*="/g/' + m[1] + '"]')) {
+        if (/\/c\//.test(a.getAttribute("href") || "")) continue; // a chat inside the project, not the project
+        const t = (a.textContent || "").trim();
+        if (t && t.length <= 60) return t;
+      }
+    } catch {}
+    const slug = location.pathname.match(/^\/g\/g-p-[0-9a-f]+-([^/]+)/i);
+    return slug ? decodeURIComponent(slug[1]) : "";
+  };
   const scanRespErr = force => {
     const now = Date.now();
     if (!force && (now - lastRespAt < 15000 || document.visibilityState === "hidden")) return;
@@ -72,14 +88,19 @@
       const root = document.querySelector("main") || document.body;
       if (!root) return;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      let found = false;
-      for (let n = walker.nextNode(); n; n = walker.nextNode()) { if (RESP_ERR.test(n.nodeValue || "")) { found = true; break; } }
-      lastRespErr = found;
+      let found = false, inter = false;
+      for (let n = walker.nextNode(); n && !(found && inter); n = walker.nextNode()) {
+        const v = n.nodeValue || "";
+        if (!found && RESP_ERR.test(v)) found = true;
+        if (!inter && INTERRUPTED.test(v)) inter = true;
+      }
+      lastRespErr = found; lastInterrupted = inter;
     } catch {}
   };
   const reportState = force => {
     try {
-      const st = { draft: composerHasDraft(), generating: isGenerating(), banner: bannerPresent(force), respErr: lastRespErr };
+      const st = { draft: composerHasDraft(), generating: isGenerating(), banner: bannerPresent(force), respErr: lastRespErr,
+        interrupted: lastInterrupted, project: projectName() };
       const key = JSON.stringify(st);
       if (!force && key === lastState) return;
       lastState = key;

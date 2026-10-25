@@ -101,7 +101,7 @@ const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFile
       res.setHeader("content-type", "application/json"); res.end('{"status":"ok","last_message_id":null}');
     });
   }
-  if (u.pathname.startsWith("/c/")) { res.setHeader("content-type", "text/html"); return res.end(PAGE); }
+  if (u.pathname.startsWith("/c/") || /^\/g\/g-p-[0-9a-f]+-[^/]+\/c\//.test(u.pathname)) { res.setHeader("content-type", "text/html"); return res.end(PAGE); }
   if (u.pathname === "/__reset") { reset(); return res.end("ok"); }
   if (u.pathname === "/backend-api/conversations/evil1" && lim.evil) {
     // Models the real service (2026-10-21): Retry-After says 1 s, but the server wants SILENCE (quiet_ms) since the last
@@ -596,6 +596,19 @@ try {
   }
   check("a server error other than 429 is written to the journal (status, path, tab)", errJ.length === 1 && errJ[0].what === "http 404" && errJ[0].tab === errTab.id, errJ);
   check("the page's 'This response couldn't load' block is written to the journal with its tab", uiJ.length === 1 && typeof uiJ[0].t === "number", uiJ);
+  // a project chat that shows "Connection interrupted": flagged on the card, project name from ChatGPT's own project link
+  await openTab("https://chatgpt.com/g/g-p-abc123def-pedvuzy/c/inter1");
+  await sleep(3000);
+  const intTab = (await tabsList()).find(t => t.url.includes("inter1"));
+  await ev(pop, `chrome.tabs.update(${intTab.id},{active:true}).then(()=>chrome.scripting.executeScript({target:{tabId:${intTab.id}},world:"MAIN",func:()=>{const a=document.createElement('a');a.href='/g/g-p-abc123def-pedvuzy/project';a.textContent='Педвузы';document.body.appendChild(a);const c=document.createElement('a');c.href='/g/g-p-abc123def-pedvuzy/c/other';c.textContent='Some chat';document.body.prepend(c);const m=document.querySelector('main')||document.body;const d=document.createElement('div');d.textContent='Connection interrupted. Waiting for the complete answer';m.appendChild(d);}}))`);
+  let it = null, itJ = [];
+  for (let i = 0; i < 30 && !(it && it.interrupted >= 0 && it.project && itJ.length); i++) {
+    await sleep(1000);
+    const sn = await snap(); it = sn.tabs[intTab.id];
+    itJ = (sn.journal || []).filter(e => e.e === "ui-error" && e.what === "connection-interrupted" && e.tab === intTab.id);
+  }
+  check("'Connection interrupted' is seen on the page and journaled", it && it.interrupted >= 0 && itJ.length === 1, { interrupted: it && it.interrupted, itJ });
+  check("the card knows the chat's PROJECT by ChatGPT's own project link (not a chat link)", it && it.project === "Педвузы", { project: it && it.project });
 
   // 14d) 'What does the server say?': ONE read-only stream_status request for the tab's chat
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
