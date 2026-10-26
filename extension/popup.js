@@ -6,11 +6,39 @@ document.documentElement.dataset.mode = MODE;
 const $ = id => document.getElementById(id);
 const send = msg => chrome.runtime.sendMessage(msg);
 
+// Every button answers a press (2026-10-26, owner: "I press and have no idea whether it worked"): it turns busy at
+// once, and when the action ends a line at the bottom says what happened. A handler may return the text to show,
+// or false when the owner cancelled it in a confirm dialog (then nothing is reported).
+let toastTimer = null;
+function toast(text, failed) {
+  const t = document.getElementById("toast");
+  if (!t) return;
+  t.textContent = text; t.className = failed ? "show failed" : "show";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ""; }, failed ? 7000 : 4500);
+}
+function press(btn, fn) {
+  return async e => {
+    if (btn.dataset.busy) return;
+    const label = btn.textContent.trim();
+    btn.dataset.busy = "1"; btn.classList.add("busy"); btn.setAttribute("aria-busy", "true");
+    const t0 = Date.now();
+    let msg, failed = false;
+    try { msg = await fn(e); } catch (err) { failed = true; msg = String((err && err.message) || err); }
+    setTimeout(() => { // let the press be seen even when the action is instant
+      delete btn.dataset.busy; btn.classList.remove("busy"); btn.removeAttribute("aria-busy");
+      if (msg === false) return;
+      toast((failed ? "✕ " : "✓ ") + (typeof msg === "string" && msg ? msg : label + ": готово"), failed);
+      if (btn.isConnected) { btn.classList.add(failed ? "failed" : "done"); setTimeout(() => btn.classList.remove("done", "failed"), 1600); }
+    }, Math.max(0, 350 - (Date.now() - t0)));
+  };
+}
+
 function el(tag, props, ...kids) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
     if (k === "class") n.className = v;
     else if (k === "text") n.textContent = v;
+    else if (k === "onclick" && tag === "button") n.addEventListener("click", press(n, v));
     else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
     else if (v != null) n.setAttribute(k, v);
   }
@@ -48,6 +76,7 @@ function tabState(t) {
   const hot = s.c429_10 >= (snap.cfg.hibernate429 || 40);
   const extras = [];
   if (s.generating && !(s.interrupted >= 0)) extras.push("идёт ответ");
+  if ((s.generating || s.interrupted >= 0) && s.answerQuietMin >= 2) extras.push(`ответ на странице не менялся ${s.answerQuietMin} мин`);
   if (s.draft) extras.push("в поле ввода есть неотправленный текст");
   if (s.held) extras.push(`запросов придержано: ${s.held}`);
   if (s.recovered) extras.push(`поток восстановлен ${s.recovered} раз`);
@@ -89,8 +118,8 @@ function renderHeader() {
 // ---- one tab card ----
 function actionBtn(t, s, p) {
   const act = {
-    heal: async () => { await send({ type: "healNow", id: t.id }); refresh(true); },
-    status: async () => { const r = await send({ type: "chatStatus", id: t.id }); statusNote[t.id] = { text: explainStatus(r), at: Date.now() }; refresh(true); },
+    heal: async () => { await send({ type: "healNow", id: t.id }); refresh(true); return "Повторная загрузка вкладки запущена"; },
+    status: async () => { const r = await send({ type: "chatStatus", id: t.id }); statusNote[t.id] = { text: explainStatus(r), at: Date.now() }; refresh(true); return "Сервер: " + explainStatus(r); },
     undead: async () => { await send({ type: "undead", id: t.id }); refresh(true); },
     protect: async () => { await send({ type: "protectTabs" }); setTimeout(() => refresh(true), 1200); },
     restart: () => restartTab(t, s)
@@ -101,11 +130,12 @@ function actionBtn(t, s, p) {
 async function restartTab(t, s) {
   let r = await send({ type: "restart", id: t.id });
   if (r && !r.ok && (r.reason === "draft" || r.reason === "generating")) {
-    if (!confirm(r.reason === "generating" ? "В этой вкладке идёт ответ. Перезапуск прервёт его отображение. Перезапустить?" : "В этой вкладке есть неотправленный текст. Он может пропасть. Перезапустить?")) return;
+    if (!confirm(r.reason === "generating" ? "В этой вкладке идёт ответ. Перезапуск прервёт его отображение. Перезапустить?" : "В этой вкладке есть неотправленный текст. Он может пропасть. Перезапустить?")) return false;
     r = await send({ type: "restart", id: t.id, force: true });
   }
-  if (r && !r.ok) alert("Не получилось: " + (r.reason || "нет ответа"));
   refresh(true);
+  if (!r || !r.ok) throw new Error("Перезапуск не получился: " + ((r && r.reason) || "нет ответа"));
+  return "Вкладка выгружена и загрузится сама, когда сервер спокоен";
 }
 
 function card(x, calm) {
@@ -124,7 +154,7 @@ function card(x, calm) {
   acts.append(el("button", { class: "small ghost", text: "Показать", title: "Перейти к этой вкладке (в её окне)", onclick: () => send({ type: "focus", id: t.id }) }));
   if (!x.primary || x.primary.act !== "status") {
     acts.append(el("button", { class: "small ghost", text: "Что на сервере?", title: "Один запрос: что сервер сообщает о чате этой вкладки",
-      onclick: async () => { const r = await send({ type: "chatStatus", id: t.id }); statusNote[t.id] = { text: explainStatus(r), at: Date.now() }; refresh(true); } }));
+      onclick: async () => { const r = await send({ type: "chatStatus", id: t.id }); statusNote[t.id] = { text: explainStatus(r), at: Date.now() }; refresh(true); return "Сервер: " + explainStatus(r); } }));
   }
   const menu = el("div", { class: "menu" });
   const m = (label, fn, cls) => menu.append(el("button", { class: cls || "", text: label, onclick: fn }));
@@ -132,15 +162,18 @@ function card(x, calm) {
   const canDiscard = !t.active && !t.discarded;
   if (canDiscard) m("Выгрузить из памяти", async () => {
     const risky = s.draft || s.generating;
-    if (risky && !confirm(s.generating ? "В этой вкладке идёт ответ. Выгрузка прервёт его отображение. Всё равно?" : "В этой вкладке есть неотправленный текст. Он может пропасть. Всё равно?")) return;
-    await send({ type: "discard", ids: [t.id], force: risky }); refresh(true);
+    if (risky && !confirm(s.generating ? "В этой вкладке идёт ответ. Выгрузка прервёт его отображение. Всё равно?" : "В этой вкладке есть неотправленный текст. Он может пропасть. Всё равно?")) return false;
+    const r = await send({ type: "discard", ids: [t.id], force: risky }); refresh(true);
+    if (!r || !(r.discarded || []).length) throw new Error("Вкладку не удалось выгрузить" + (r && r.skipped && r.skipped[0] ? ": " + r.skipped[0].reason : ""));
+    return "Вкладка выгружена из памяти";
   });
   if (s.broken && (!x.primary || x.primary.act !== "heal")) m("Повторить загрузку сейчас", async () => { await send({ type: "healNow", id: t.id }); refresh(true); });
   if (s.streaming >= 0 || s.stopReq >= 0) m("Остановить ответ на сервере", async () => {
-    if (!confirm("Остановить генерацию в этом чате на сервере?\n\nЕсли там идёт настоящая задача, а не зависший ответ, она будет прервана.\n\nСервер освобождает чат не сразу: статус «остановка запрошена» может держаться несколько минут.")) return;
+    if (!confirm("Остановить генерацию в этом чате на сервере?\n\nЕсли там идёт настоящая задача, а не зависший ответ, она будет прервана.\n\nСервер освобождает чат не сразу: статус «остановка запрошена» может держаться несколько минут.")) return false;
     const r = await send({ type: "stopStream", id: t.id });
-    if (!r || !r.ok) alert("Не получилось отправить остановку: " + ((r && (r.reason || r.http)) || "нет ответа"));
     refresh(true);
+    if (!r || !r.ok) throw new Error("Остановку отправить не удалось: " + ((r && (r.reason || r.http)) || "нет ответа"));
+    return "Остановка отправлена, сервер её принял";
   }, "dangerous");
   if (!s.deadStream && s.streaming >= 0) m("Считать ответ зависшим (20 мин)", async () => { await send({ type: "markDead", id: t.id }); refresh(true); });
   if (s.deadStream && (!x.primary || x.primary.act !== "undead")) m("Снять пометку «зависший»", async () => { await send({ type: "undead", id: t.id }); refresh(true); });
@@ -151,7 +184,10 @@ function card(x, calm) {
   const det = (s.fam60.detail || 0) + (s.fam60.legacy || 0);
   cardEl.append(el("div", { class: "meta", text: `${s.req60} запр/мин · история ${det} · ответ ${s.fam60.stream || 0} · ${s.mb10} МБ/10 мин${s.c429_10 ? ` · отказов ${s.c429_10}` : ""}` }));
   const sn = statusNote[t.id];
-  if (sn && Date.now() - sn.at < 10 * 60000) cardEl.append(el("div", { class: "srv", text: "Сервер: " + sn.text + " (" + new Date(sn.at).toTimeString().slice(0, 5) + ")" }));
+  if (sn && Date.now() - sn.at < 10 * 60000) {
+    const ago = Math.floor((Date.now() - sn.at) / 60000);
+    cardEl.append(el("div", { class: "srv", text: `Сервер (проверено в ${new Date(sn.at).toTimeString().slice(0, 5)}, ${ago ? ago + " мин назад" : "только что"}): ${sn.text}` }));
+  }
   return cardEl;
 }
 
@@ -312,7 +348,7 @@ async function refresh(force) {
     if (!snap || snap.error) return;
     states = tabsNow.map(tabState);
     renderHeader(); renderMeters(); renderSessions(); renderJournal(); renderHib(); renderRuns(); renderReaper();
-    const sig = JSON.stringify([states.map(x => [x.t.id, x.t.title, x.t.active, x.t.discarded, x.sev, x.text, x.extra, x.s.req60, x.s.mb10, x.s.c429_10]), curTabId, Object.keys(statusNote).map(k => statusNote[k].at)]);
+    const sig = JSON.stringify([states.map(x => [x.t.id, x.t.title, x.t.active, x.t.discarded, x.sev, x.text, x.extra, x.s.req60, x.s.mb10, x.s.c429_10]), curTabId, Object.keys(statusNote).map(k => statusNote[k].at), Math.floor(Date.now() / 60000)]);
     if (force || (sig !== lastSig && !document.querySelector("details.more[open]"))) { renderTabs(); lastSig = sig; }
     const unprotected = tabsNow.filter(t => !t.discarded && !(snap.tabs[t.id] || {}).guard).length;
     $("btnProtect").hidden = unprotected === 0;
@@ -337,15 +373,19 @@ function showSkipped(res) {
 }
 $("btnLoops").onclick = async () => {
   const ids = tabsNow.filter(t => !t.active && !t.discarded && (snap.tabs[t.id] || {}).loop).map(t => t.id);
-  if (ids.length) showSkipped(await send({ type: "discard", ids }));
+  if (!ids.length) return "Зацикленных вкладок нет";
+  const r = await send({ type: "discard", ids }); showSkipped(r);
   refresh(true);
+  return `Выгружено вкладок: ${(r && r.discarded || []).length}`;
 };
 $("btnBg").onclick = async () => {
   const ids = tabsNow.filter(t => !t.active && !t.discarded && !t.audible).map(t => t.id);
-  if (ids.length && confirm(`Выгрузить из памяти фоновые вкладки ChatGPT (до ${ids.length})? Вкладки с неотправленным текстом или идущим ответом будут пропущены.`)) {
-    showSkipped(await send({ type: "discard", ids }));
+  if (!ids.length) return "Фоновых вкладок для выгрузки нет";
+  if (!confirm(`Выгрузить из памяти фоновые вкладки ChatGPT (до ${ids.length})? Вкладки с неотправленным текстом или идущим ответом будут пропущены.`)) {
+    const r = await send({ type: "discard", ids }); showSkipped(r); refresh(true);
+    return `Выгружено вкладок: ${(r && r.discarded || []).length}`;
   }
-  refresh(true);
+  return false;
 };
 $("btnProtect").onclick = async () => {
   $("btnProtect").disabled = true;
@@ -382,5 +422,7 @@ $("chkHeal").onchange = async e => { await send({ type: "setCfg", patch: { autoH
 $("chkEnabled").onchange = async e => { await send({ type: "setCfg", patch: { enabled: e.target.checked } }); };
 $("gap").onchange = async e => { await send({ type: "setCfg", patch: { restoreGapSec: Math.max(3, Number(e.target.value) || 12) } }); };
 
+// static buttons get the same press feedback as the card buttons
+for (const b of document.querySelectorAll("button[id]")) if (b.onclick) { const f = b.onclick; b.onclick = null; b.addEventListener("click", press(b, f)); }
 refresh(true);
 setInterval(() => refresh(false), 1500);

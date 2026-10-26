@@ -60,6 +60,18 @@
     } catch { return (lastBanner = false); }
   };
   let lastState = "";
+  // When did the text of the last answer change for the last time? Lets the panel say "the answer has not changed for
+  // N min" (2026-10-26: the owner could not tell how long a chat had been hanging). Only the last answer is measured.
+  let ansLen = -1, ansAt = 0;
+  const answerChangedAt = () => {
+    try {
+      const all = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const last = all[all.length - 1];
+      const len = last ? (last.textContent || "").length : 0;
+      if (len !== ansLen) { ansLen = len; ansAt = Date.now(); }
+    } catch {}
+    return ansAt;
+  };
   // "This response couldn't load" under an answer: only journaled (the cause is looked up in the request errors);
   // nothing is clicked. Same cheap scan as the banner, visible tabs only.
   const RESP_ERR = /this response couldn.t load|couldn.t load this response|не удалось загрузить (этот )?ответ/i;
@@ -100,7 +112,7 @@
   const reportState = force => {
     try {
       const st = { draft: composerHasDraft(), generating: isGenerating(), banner: bannerPresent(force), respErr: lastRespErr,
-        interrupted: lastInterrupted, project: projectName() };
+        interrupted: lastInterrupted, project: projectName(), answerAt: answerChangedAt() };
       const key = JSON.stringify(st);
       if (!force && key === lastState) return;
       lastState = key;

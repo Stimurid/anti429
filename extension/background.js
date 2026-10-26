@@ -377,6 +377,7 @@ function snapshot() {
     t.draft = !!(P[id] && P[id].draft);
     t.generating = !!(P[id] && P[id].generating);
     t.project = (P[id] && P[id].project) || "";
+    t.answerQuietMin = P[id] && P[id].answerAt ? Math.floor((now - P[id].answerAt) / 60000) : -1;
     t.interrupted = P[id] && P[id].interruptedSince ? Math.floor((now - P[id].interruptedSince) / 60000) : -1;
     t.guard = !!G[id];
     t.recovered = R[id] || 0;
@@ -848,6 +849,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (id != null && msg.state) {
           const was = P[id] || {};
           P[id] = { draft: !!msg.state.draft, generating: !!msg.state.generating, project: String(msg.state.project || "").slice(0, 60),
+            answerAt: Number(msg.state.answerAt) || 0,
             interruptedSince: msg.state.interrupted ? (was.interruptedSince || Date.now()) : 0 };
           if (msg.state.interrupted && !was.interruptedSince) jr("ui-error", { tab: id, what: "connection-interrupted", title: String(sender.tab.title || "").slice(0, 40) });
           // the page itself shows the error block (e.g. it was already stuck when the extension started)

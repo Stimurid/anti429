@@ -623,6 +623,13 @@ try {
   lim.convs[0].status = "COMPLETE"; lim.convs[0].live = false;
   const cs2 = await call({ type: "chatStatus", id: csTab.id });
   check("chat status: COMPLETE is reported once it finished", cs2 && cs2.ok === true && cs2.status === "COMPLETE", cs2);
+  // the button answers the press: busy at once, then a line at the bottom with the server's answer, and the card note
+  // says WHEN it was checked and how long ago (2026-10-26: "(04:26)" alone was unreadable)
+  await ev(pop, "refresh(true)");
+  await sleep(800);
+  const pressed = await ev(pop, `(async()=>{const b=[...document.querySelectorAll('.tab button')].find(x=>x.textContent.trim()==='Что на сервере?'&&x.closest('.tab').querySelector('.t').title.includes('cccccccc-0000')||x.textContent.trim()==='Что на сервере?');if(!b)return {found:false};b.click();await new Promise(r=>setTimeout(r,60));const busy=b.classList.contains('busy');await new Promise(r=>setTimeout(r,2500));const t=document.getElementById('toast');return {found:true,busy,toast:t.textContent,shown:t.classList.contains('show'),note:(document.querySelector('.tab .srv')||{}).textContent||''};})()`);
+  check("a pressed button turns busy at once and then the bottom line tells the result", pressed.found && pressed.busy && pressed.shown && /^✓ Сервер: /.test(pressed.toast), pressed);
+  check("the server note says when it was checked and how long ago", /проверено в \d\d:\d\d, (только что|\d+ мин назад)/.test(pressed.note || ""), { note: pressed.note });
   await ev(pop, "chrome.tabs.query({url:'https://chatgpt.com/*'}).then(ts=>chrome.tabs.remove(ts.map(t=>t.id)))");
 
   // 14c) the 'evil' server (accumulating penalty): a client that retries at Retry-After never gets in. The escalating heal
