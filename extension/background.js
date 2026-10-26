@@ -1,7 +1,7 @@
 // 4̅2̅9̅ (Anti-429) service worker.
 // Observes every /backend-api request via webRequest (read-only), meters the four limiter families,
 // learns lower ceilings from real 429s, drives the badge/icon traffic light and serves the popup.
-importScripts("shared.js", "health_bridge.js");
+importScripts("shared.js", "health_bridge.js", "project_cache.js");
 const A = self.A429;
 
 const DEFAULT_CFG = {
@@ -425,7 +425,10 @@ let reaperAuditing = false;
 
 async function reaperState() {
   const { reaper } = await chrome.storage.local.get("reaper");
-  return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 } }, reaper || {});
+  return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 },
+    projectCatalog: {}, projectCursors: {}, projectOffset: 0,
+    projectCatalogCursor:"0",projectCatalogComplete:false,projectAccountScope:null
+  }, reaper || {});
 }
 
 async function reaperTick(force) {
@@ -452,12 +455,34 @@ async function reaperTick(force) {
     let scan = null;
     reaperAuditing = true; // the audit's own requests are not the user's load: keep them out of the meters/learning
     try {
-      scan = await chrome.tabs.sendMessage(tab.id, { type: "a429_scan", params: {
+      const openProjects=tabs.map(t=>(String(t.url).split("/g/")[1]||"").split("/")[0])
+        .filter(g=>self.A429ProjectCache?.goodProject(g));
+      const catalogue=Object.keys(R.projectCatalog||{}).filter(g=>self.A429ProjectCache?.goodProject(g));
+      const params={
         idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: [...new Set([...watchIds,...Object.keys(R.obs)])],
-        paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus, maxList: deep ? 224 : 56, projectPages: deep ? 6 : 1,
+        paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus,
+        maxList: deep ? 224 : 56, projectPages: deep ? 3 : 1,
+        maxProjects: deep ? 6 : 4, projectOffset: R.projectOffset||0,
+        projectCursors: R.projectCursors||{},
+        catalogFetch: deep||R.projectCatalogComplete!==true,
+        catalogCursor: deep&&R.projectCatalogComplete===true?
+          "0":(R.projectCatalogCursor||"0"),
         skip: Object.fromEntries(Object.entries(R.chk).filter(([, v]) => v.st === "COMPLETE").map(([k, v]) => [k, v.u])),
-        projectIds: [...new Set(tabs.map(t => (String(t.url).split("/g/")[1] || "").split("/")[0]).filter(Boolean))]
-      } });
+        projectIds: [...new Set([...openProjects,...catalogue])]
+      };
+      try{
+        // Inject only the new metadata reader. Unlike the legacy bridge.js,
+        // it has no 4-second timers; reloading ChatGPT tabs is not required.
+        await chrome.scripting.executeScript({target:{tabId:tab.id},
+          world:"ISOLATED",files:["project_audit_bridge.js"]});
+        scan=await chrome.tabs.sendMessage(tab.id,{
+          type:"a429_project_audit_v1",params});
+      }catch(_){
+        // Existing reaper continues to work when this extension/page cannot
+        // expose project metadata. Legacy scan remains network-budgeted.
+        try{scan=await chrome.tabs.sendMessage(tab.id,{type:"a429_scan",params});}
+        catch(_){}
+      }
     } catch {}
     reaperAuditing = false;
     R.lastAudit = now;
@@ -465,6 +490,31 @@ async function reaperTick(force) {
     if (!scan || !scan.ok) { R.lastError = (scan && scan.reason) || "no-bridge"; await chrome.storage.local.set({ reaper: R }); return { error: R.lastError }; }
     R.lastError = null;
     R.health=self.A429Health.observe(R.health||{},scan,Date.now());
+    // Names and positive IDs come from the SAME paced scan. Persist the
+    // pagination frontier rather than hammering all projects on every pass.
+    if(scan.accountScope&&scan.accountScope!==R.projectAccountScope){
+      R.projectCatalog={};R.projectCursors={};R.projectOffset=0;
+      R.projectCatalogCursor="0";R.projectCatalogComplete=false;
+      R.projectAccountScope=scan.accountScope;
+    }
+    if(scan.catalogFetched===true){
+      R.projectCatalog={...(R.projectCatalog||{}),...(scan.projectNames||{})};
+      R.projectCatalogCursor=scan.catalogNextCursor||"0";
+      R.projectCatalogComplete=!scan.catalogNextCursor;
+    }
+    if(scan.projectsScanned>0)R.projectOffset=(R.projectOffset||0)+scan.projectsScanned;
+    if(scan.projectCursors)R.projectCursors={
+      ...(R.projectCursors||{}),...scan.projectCursors};
+    // Reuse the SAME already-conducted account audit; zero additional HYDRA provider reads.
+    // A separate bounded, hashed-account cache is shared read-only with HYDRA.
+    if(self.A429ProjectCache){
+      try {
+        const key=self.A429ProjectCache.STORAGE_KEY;
+        const prior=(await chrome.storage.local.get(key))[key];
+        const cache=self.A429ProjectCache.update(prior,scan,Date.now());
+        await chrome.storage.local.set({[key]:cache});
+      }catch(_){}
+    }
     if (scan.rate) { R.lastRate = now; R.lastAudit = now - every + cfg.reaperRateBackoffMs; } // 429: back off for a long time
 
     const day = new Date(now).toISOString().slice(0, 10);
@@ -961,6 +1011,23 @@ chrome.windows.onRemoved.addListener(async id => {
 // HYDRA requests cached evidence only. It cannot make this API Send, Retry,
 // Stop, enumerate history or force an account scan past the existing governor.
 if(chrome.runtime.onMessageExternal)chrome.runtime.onMessageExternal.addListener((msg,sender,reply)=>{
+ // Exact extension-to-extension metadata only. Does not schedule scan, request
+ // history, read chat text, or grant destructive 429/reaper capabilities.
+ if(sender.id==="opgnfgihbjphabgflgnaiamenmdgfjom"&&!sender.tab&&
+    msg?.type==="hydra.projectMembership.read"){
+   (async()=>{const cacheModule=self.A429ProjectCache;
+     if(!cacheModule)return {ok:false,error:"PROJECT_CACHE_UNAVAILABLE"};
+     const ids=msg.conversationIds;
+     if(!Array.isArray(ids)||!ids.length||ids.length>cacheModule.MAX_QUERY||
+       ids.some(id=>!cacheModule.goodId(id)))
+       return {ok:false,error:"INVALID_CONVERSATION_IDS"};
+     const key=cacheModule.STORAGE_KEY;
+     const cache=(await chrome.storage.local.get(key))[key];
+     return cacheModule.read(cache,ids,Date.now());
+   })().then(reply,()=>reply({ok:false,error:"PROJECT_CACHE_READ_FAILED"}));
+   return true;
+ }
+
  if(sender.id!=="opgnfgihbjphabgflgnaiamenmdgfjom" || sender.tab ||
     msg?.type!=="hydra.health.read" || !self.A429Health.validId(msg.conversationId)){
    reply({ok:false,error:"HEALTH_READ_SCOPE_REQUIRED"});return false;
