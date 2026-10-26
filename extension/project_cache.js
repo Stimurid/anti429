@@ -39,7 +39,7 @@
     const names=old.scope===scope?{...old.names}:{};
     for(const [id,value] of Object.entries(scan.projectNames||{})){
       const name=typeof value==="string"?
-        value.replace(/\\s+/g," ").trim().slice(0,64):"";
+        value.replace(/\s+/g," ").trim().slice(0,64):"";
       if(goodProject(id)&&name)names[id]={name,at:now};
     }
     for(const item of Array.isArray(scan.items)?scan.items:[]){
