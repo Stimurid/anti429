@@ -1,7 +1,7 @@
 // 4̅2̅9̅ (Anti-429) service worker.
 // Observes every /backend-api request via webRequest (read-only), meters the four limiter families,
 // learns lower ceilings from real 429s, drives the badge/icon traffic light and serves the popup.
-importScripts("shared.js", "health_bridge.js");
+importScripts("shared.js", "health_bridge.js", "project_cache.js");
 const A = self.A429;
 
 const DEFAULT_CFG = {
@@ -465,6 +465,16 @@ async function reaperTick(force) {
     if (!scan || !scan.ok) { R.lastError = (scan && scan.reason) || "no-bridge"; await chrome.storage.local.set({ reaper: R }); return { error: R.lastError }; }
     R.lastError = null;
     R.health=self.A429Health.observe(R.health||{},scan,Date.now());
+    // Reuse the SAME already-conducted account audit; zero extra provider reads.
+    // A separate bounded, hashed-account cache is shared read-only with HYDRA.
+    if(self.A429ProjectCache){
+      try {
+        const key=self.A429ProjectCache.STORAGE_KEY;
+        const prior=(await chrome.storage.local.get(key))[key];
+        const cache=self.A429ProjectCache.update(prior,scan,Date.now());
+        await chrome.storage.local.set({[key]:cache});
+      }catch(_){}
+    }
     if (scan.rate) { R.lastRate = now; R.lastAudit = now - every + cfg.reaperRateBackoffMs; } // 429: back off for a long time
 
     const day = new Date(now).toISOString().slice(0, 10);
@@ -961,6 +971,23 @@ chrome.windows.onRemoved.addListener(async id => {
 // HYDRA requests cached evidence only. It cannot make this API Send, Retry,
 // Stop, enumerate history or force an account scan past the existing governor.
 if(chrome.runtime.onMessageExternal)chrome.runtime.onMessageExternal.addListener((msg,sender,reply)=>{
+ // Exact extension-to-extension metadata only. Does not schedule scan, request
+ // history, read chat text, or grant destructive 429/reaper capabilities.
+ if(sender.id==="opgnfgihbjphabgflgnaiamenmdgfjom"&&!sender.tab&&
+    msg?.type==="hydra.projectMembership.read"){
+   (async()=>{const cacheModule=self.A429ProjectCache;
+     if(!cacheModule)return {ok:false,error:"PROJECT_CACHE_UNAVAILABLE"};
+     const ids=msg.conversationIds;
+     if(!Array.isArray(ids)||!ids.length||ids.length>cacheModule.MAX_QUERY||
+       ids.some(id=>!cacheModule.goodId(id)))
+       return {ok:false,error:"INVALID_CONVERSATION_IDS"};
+     const key=cacheModule.STORAGE_KEY;
+     const cache=(await chrome.storage.local.get(key))[key];
+     return cacheModule.read(cache,ids,Date.now());
+   })().then(reply,()=>reply({ok:false,error:"PROJECT_CACHE_READ_FAILED"}));
+   return true;
+ }
+
  if(sender.id!=="opgnfgihbjphabgflgnaiamenmdgfjom" || sender.tab ||
     msg?.type!=="hydra.health.read" || !self.A429Health.validId(msg.conversationId)){
    reply({ok:false,error:"HEALTH_READ_SCOPE_REQUIRED"});return false;
