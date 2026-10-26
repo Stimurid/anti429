@@ -140,10 +140,10 @@
       if (!it || typeof it.id !== "string" || !/^[a-z0-9-]{8,80}$/i.test(it.id)) return;
       const listed=validProject(g)?g:null;
       const itemProject=validProject(it.gizmo_id)?it.gizmo_id:null;
-      // A null in the *general* list is not authoritative negative evidence.
-      // A later project-specific listing may establish the actual membership.
-      const explicitNone=Object.prototype.hasOwnProperty.call(it,"gizmo_id")&&
-        it.gizmo_id===null&&!listed;
+      // A general-list null is NOT proof that a project membership was
+      // removed: project-specific lists can still return the same chat.
+      // Only an explicit positive project ID is accepted as evidence here.
+      const explicitNone=false;
       if(itemProject)gizmos.add(itemProject);
       const conflict=!!(listed&&itemProject&&listed!==itemProject);
       const project=conflict?null:(itemProject||listed);
@@ -151,9 +151,7 @@
       if(prior){
         // A conversation may be in BOTH the general list and its project list.
         // Reconcile the evidence instead of losing the later project membership.
-        if(conflict||prior.conflict||
-          (prior.g&&project&&prior.g!==project)||
-          false){
+        if(conflict||prior.conflict||(prior.g&&project&&prior.g!==project)){
           prior.g=null;prior.conflict=true;prior.explicitNone=false;
         }else if(project&&!prior.g){
           prior.g=project;prior.explicitNone=false;
