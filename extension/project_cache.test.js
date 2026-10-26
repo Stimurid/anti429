@@ -46,7 +46,7 @@ test("expired evidence, invalid ids and oversized requests are rejected",()=>{
 });
 test("integration uses existing audit only and restricts HYDRA caller",()=>{
  const bg=fs.readFileSync(path.join(__dirname,"background.js"),"utf8");
- const bridge=fs.readFileSync(path.join(__dirname,"bridge.js"),"utf8");
+ const bridge=fs.readFileSync(path.join(__dirname,"project_audit_bridge.js"),"utf8");
  assert.match(bg,/importScripts\("shared.js", "health_bridge.js", "project_cache.js"\)/);
  assert.match(bg,/A429ProjectCache.update\(prior,scan,Date.now\(\)\)/);
  assert.match(bg,/msg\?\.type==="hydra.projectMembership.read"/);
@@ -89,7 +89,7 @@ test("scoped catalogue is flushed on login switch",()=>{
 });
 test("429 bridges HYDRA without a new scan on read and keeps the 429 limiter",()=>{
  const bg=fs.readFileSync(path.join(__dirname,"background.js"),"utf8");
- const provider=fs.readFileSync(path.join(__dirname,"bridge.js"),"utf8");
+ const provider=fs.readFileSync(path.join(__dirname,"project_audit_bridge.js"),"utf8");
  const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,"manifest.json"),"utf8"));
  assert.equal(manifest.version,"0.5.15");
  assert(bg.includes('msg?.type==="hydra.projectMembership.read"'));
