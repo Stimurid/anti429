@@ -100,7 +100,9 @@
   async function scanAccount(p) {
     const pace = Math.max(0, p.paceMs == null ? 2000 : p.paceMs); // one request per `pace` ms: stay far below the limiters
     const t0 = Date.now();
-    const out = { ok: false, items: [], statuses: {}, rate: false, errors: 0, requests: 0, ms: 0 };
+    const out = { ok: false, items: [], statuses: {}, rate: false, errors: 0,
+      requests: 0, ms: 0, projectNames: {}, projectCursors: {}, projectsScanned: 0,
+      catalogFetched: false, catalogNextCursor: null };
     let tok = null, accountScope = null;
     try {
       const session = await (await fetch("/api/auth/session", { credentials: "include" })).json();
@@ -159,6 +161,27 @@
         explicitNone,conflict};
       seen.set(it.id,record);out.items.push(record);
     };
+    // Discover project IDs/names via a single paced project-sidebar page in
+    // the EXISTING audit loop. Never issue a second scan from HYDRA.
+    if (p.catalogFetch && !out.rate) {
+      const cursor=typeof p.catalogCursor==="string"&&p.catalogCursor!=="0"?
+        "&cursor="+encodeURIComponent(p.catalogCursor):"";
+      const r=await get("/backend-api/gizmos/snorlax/sidebar?owned_only=true&conversations_per_gizmo=0"+cursor);
+      if(r){
+        let j=null;try{j=await r.json();}catch(_){out.errors++;}
+        if(j&&Array.isArray(j.items)){
+          for(const item of j.items){
+            const project=item?.gizmo?.gizmo;
+            const id=project?.id,name=project?.display?.name;
+            if(!validProject(id)||typeof name!=="string"||!name.trim())continue;
+            gizmos.add(id);
+            out.projectNames[id]=name.replace(/\\s+/g," ").trim().slice(0,64);
+          }
+          out.catalogFetched=true;
+          out.catalogNextCursor=typeof j.cursor==="string"&&j.cursor?j.cursor:null;
+        }
+      }
+    }
     for (let off = 0; off < (p.maxList || 112) && !out.rate; off += 28) {
       const r = await get("/backend-api/conversations?offset=" + off + "&limit=28&order=updated");
       if (!r) break;
@@ -166,17 +189,39 @@
       if (!j.items || !j.items.length) break;
       j.items.forEach(it => add(it, null));
     }
-    for (const g of gizmos) {
-      if (out.rate) break;
-      let cur = "0";
-      for (let i = 0; i < (p.projectPages || 4); i++) {
-        const r = await get("/backend-api/gizmos/" + g + "/conversations?cursor=" + cur + "&limit=25");
-        if (!r) break;
-        const j = await r.json();
-        (j.items || []).forEach(it => add(it, g));
-        if (!j.cursor || !(j.items || []).length) break;
-        cur = j.cursor;
-        }
+    // Progressive catalog traversal. Bound requests per audit and resume
+    // each project's opaque pagination cursor on subsequent audits, so old
+    // /c/... conversations eventually become covered without full history GETs.
+    const allProjects=[...gizmos].filter(validProject);
+    const offset=allProjects.length?
+      Math.max(0,Math.floor(Number(p.projectOffset)||0))%allProjects.length:0;
+    const maxProjects=Math.min(12,Math.max(0,Math.floor(Number(p.maxProjects)||4)));
+    const selected=allProjects.length?
+      Array.from({length:Math.min(maxProjects,allProjects.length)},
+        (_,i)=>allProjects[(offset+i)%allProjects.length]):[];
+    for(const g of selected){
+      if(out.rate)break;
+      let cur=typeof p.projectCursors?.[g]==="string"&&p.projectCursors[g]?
+        p.projectCursors[g]:"0";
+      let scanned=false;
+      for(let i=0;i<(p.projectPages||1)&&!out.rate;i++){
+        const r=await get("/backend-api/gizmos/"+encodeURIComponent(g)+
+          "/conversations?cursor="+encodeURIComponent(cur)+"&limit=25");
+        if(!r)break;
+        let j;try{j=await r.json();}catch(_){out.errors++;break;}
+        if(!Array.isArray(j.items))break;
+        j.items.forEach(it=>add(it,g));
+        scanned=true;
+        cur=typeof j.cursor==="string"&&j.cursor&&j.items.length?j.cursor:"0";
+        if(cur==="0")break;
+      }
+      if(scanned){
+        out.projectCursors[g]=cur;
+        out.projectsScanned++;
+      }else if(!out.rate){
+        // A private or removed project must not keep the whole rotation stuck.
+        out.projectsScanned++;
+      }
     }
     const now = Date.now();
     const skip = p.skip || {};
