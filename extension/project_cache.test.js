@@ -57,3 +57,46 @@ test("integration uses existing audit only and restricts HYDRA caller",()=>{
  assert.match(bridge,/const seen = new Map/);
  assert.match(bridge,/prior\.g&&project&&prior\.g!==project/);
 });
+
+test("catalog display name binds to exact project ID without chat title leakage",()=>{
+ const now=1700000000000;
+ const state=cache.update(null,{accountScope:SCOPE,
+  projectNames:{[PROJECT]:"  МЕТАКСИ   07  "},
+  items:[{id:CID,g:PROJECT,t:"PRIVATE CONVERSATION TITLE"}]},now);
+ const result=cache.read(state,[CID],now+1000);
+ assert.equal(result.ok,true);
+ assert.equal(result.names[PROJECT].name,"МЕТАКСИ 07");
+ assert.equal(result.names[PROJECT].source,"provider_project_catalog");
+ assert.equal(result.matches[CID].projectId,PROJECT);
+ assert.equal(JSON.stringify(result).includes("PRIVATE CONVERSATION TITLE"),false);
+ assert.equal(result.names["g-p-unknown"],undefined);
+});
+test("catalog names and project membership expire separately",()=>{
+ const now=1700000000000;
+ let state=cache.update(null,{accountScope:SCOPE,
+  projectNames:{[PROJECT]:"Артикль"},items:[{id:CID,g:PROJECT}]},now);
+ const later=cache.read(state,[CID],now+cache.TTL_MS+1);
+ assert.equal(later.matches[CID],undefined);
+ assert.equal(later.names[PROJECT],undefined);
+});
+test("scoped catalogue is flushed on login switch",()=>{
+ const now=1700000000000;
+ const a=cache.update(null,{accountScope:SCOPE,
+  projectNames:{[PROJECT]:"МЕТАКСИ"},items:[{id:CID,g:PROJECT}]},now);
+ const b=cache.update(a,{accountScope:"sha256:"+"c".repeat(64),items:[]},now+1000);
+ assert.deepEqual(b.records,{});
+ assert.deepEqual(b.names,{});
+});
+test("429 bridges HYDRA without a new scan on read and keeps the 429 limiter",()=>{
+ const bg=fs.readFileSync(path.join(__dirname,"background.js"),"utf8");
+ const provider=fs.readFileSync(path.join(__dirname,"bridge.js"),"utf8");
+ const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,"manifest.json"),"utf8"));
+ assert.equal(manifest.version,"0.5.15");
+ assert(bg.includes('msg?.type==="hydra.projectMembership.read"'));
+ assert(bg.includes("cacheModule.read(cache,ids,Date.now())"));
+ assert(bg.includes("calmNow(now)"));
+ assert(bg.includes("projectCursors: R.projectCursors||{}"));
+ assert(provider.includes('const explicitNone=false'));
+ assert(provider.includes('const seen = new Map()'));
+ assert(provider.includes('out.projectCursors[g]=cur'));
+});
