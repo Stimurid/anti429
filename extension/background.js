@@ -425,7 +425,10 @@ let reaperAuditing = false;
 
 async function reaperState() {
   const { reaper } = await chrome.storage.local.get("reaper");
-  return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 } }, reaper || {});
+  return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 },
+    projectCatalog: {}, projectCursors: {}, projectOffset: 0,
+    projectCatalogCursor:"0",projectCatalogComplete:false,projectAccountScope:null
+  }, reaper || {});
 }
 
 async function reaperTick(force) {
@@ -452,11 +455,20 @@ async function reaperTick(force) {
     let scan = null;
     reaperAuditing = true; // the audit's own requests are not the user's load: keep them out of the meters/learning
     try {
+      const openProjects=tabs.map(t=>(String(t.url).split("/g/")[1]||"").split("/")[0])
+        .filter(g=>self.A429ProjectCache?.goodProject(g));
+      const catalogue=Object.keys(R.projectCatalog||{}).filter(g=>self.A429ProjectCache?.goodProject(g));
       scan = await chrome.tabs.sendMessage(tab.id, { type: "a429_scan", params: {
         idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: [...new Set([...watchIds,...Object.keys(R.obs)])],
-        paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus, maxList: deep ? 224 : 56, projectPages: deep ? 6 : 1,
+        paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus,
+        maxList: deep ? 224 : 56, projectPages: deep ? 3 : 1,
+        maxProjects: deep ? 6 : 4, projectOffset: R.projectOffset||0,
+        projectCursors: R.projectCursors||{},
+        catalogFetch: deep||R.projectCatalogComplete!==true,
+        catalogCursor: deep&&R.projectCatalogComplete===true?
+          "0":(R.projectCatalogCursor||"0"),
         skip: Object.fromEntries(Object.entries(R.chk).filter(([, v]) => v.st === "COMPLETE").map(([k, v]) => [k, v.u])),
-        projectIds: [...new Set(tabs.map(t => (String(t.url).split("/g/")[1] || "").split("/")[0]).filter(Boolean))]
+        projectIds: [...new Set([...openProjects,...catalogue])]
       } });
     } catch {}
     reaperAuditing = false;
@@ -465,7 +477,22 @@ async function reaperTick(force) {
     if (!scan || !scan.ok) { R.lastError = (scan && scan.reason) || "no-bridge"; await chrome.storage.local.set({ reaper: R }); return { error: R.lastError }; }
     R.lastError = null;
     R.health=self.A429Health.observe(R.health||{},scan,Date.now());
-    // Reuse the SAME already-conducted account audit; zero extra provider reads.
+    // Names and positive IDs come from the SAME paced scan. Persist the
+    // pagination frontier rather than hammering all projects on every pass.
+    if(scan.accountScope&&scan.accountScope!==R.projectAccountScope){
+      R.projectCatalog={};R.projectCursors={};R.projectOffset=0;
+      R.projectCatalogCursor="0";R.projectCatalogComplete=false;
+      R.projectAccountScope=scan.accountScope;
+    }
+    if(scan.catalogFetched===true){
+      R.projectCatalog={...(R.projectCatalog||{}),...(scan.projectNames||{})};
+      R.projectCatalogCursor=scan.catalogNextCursor||"0";
+      R.projectCatalogComplete=!scan.catalogNextCursor;
+    }
+    if(scan.projectsScanned>0)R.projectOffset=(R.projectOffset||0)+scan.projectsScanned;
+    if(scan.projectCursors)R.projectCursors={
+      ...(R.projectCursors||{}),...scan.projectCursors};
+    // Reuse the SAME already-conducted account audit; zero additional HYDRA provider reads.
     // A separate bounded, hashed-account cache is shared read-only with HYDRA.
     if(self.A429ProjectCache){
       try {
