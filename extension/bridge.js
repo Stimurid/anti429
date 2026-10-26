@@ -140,7 +140,10 @@
       if (!it || typeof it.id !== "string" || !/^[a-z0-9-]{8,80}$/i.test(it.id)) return;
       const listed=validProject(g)?g:null;
       const itemProject=validProject(it.gizmo_id)?it.gizmo_id:null;
-      const explicitNone=Object.prototype.hasOwnProperty.call(it,"gizmo_id")&&it.gizmo_id===null;
+      // A null in the *general* list is not authoritative negative evidence.
+      // A later project-specific listing may establish the actual membership.
+      const explicitNone=Object.prototype.hasOwnProperty.call(it,"gizmo_id")&&
+        it.gizmo_id===null&&!listed;
       if(itemProject)gizmos.add(itemProject);
       const conflict=!!(listed&&itemProject&&listed!==itemProject);
       const project=conflict?null:(itemProject||listed);
@@ -150,15 +153,16 @@
         // Reconcile the evidence instead of losing the later project membership.
         if(conflict||prior.conflict||
           (prior.g&&project&&prior.g!==project)||
-          (prior.explicitNone&&project)||(explicitNone&&prior.g)){
+          false){
           prior.g=null;prior.conflict=true;prior.explicitNone=false;
-        }else if(project&&!prior.g&&!prior.explicitNone)prior.g=project;
-        else if(explicitNone&&!prior.g)prior.explicitNone=true;
+        }else if(project&&!prior.g){
+          prior.g=project;prior.explicitNone=false;
+        }else if(explicitNone&&!prior.g)prior.explicitNone=true;
         return;
       }
       const record={id:it.id,t:String(it.title||"").slice(0,40),
         u:Date.parse(it.update_time)||0,g:project,a:it.async_status==null?null:it.async_status,
-        explicitNone,conflict};
+        explicitNone:explicitNone&&!project,conflict};
       seen.set(it.id,record);out.items.push(record);
     };
     // Discover project IDs/names via a single paced project-sidebar page in
