@@ -121,7 +121,7 @@
   };
   setInterval(() => { scanRespErr(false); reportState(false); }, 4000);
   document.addEventListener("input", () => reportState(false), true);
-  document.addEventListener("visibilitychange", () => reportState(true));
+  document.addEventListener("visibilitychange", () => { scanRespErr(true); reportState(true); });
   setTimeout(() => reportState(true), 1500);
 
   // Auto-heal: click the page's own retry button, but ONLY inside the error block (never the

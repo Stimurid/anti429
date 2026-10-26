@@ -80,19 +80,25 @@ function tabState(t) {
   if (s.draft) extras.push("в поле ввода есть неотправленный текст");
   if (s.held) extras.push(`запросов придержано: ${s.held}`);
   if (s.recovered) extras.push(`поток восстановлен ${s.recovered} раз`);
+  // how long ago the SERVER last changed this chat (from the background-runs audit): the only honest sign that a long
+  // agent answer is still alive when the page itself shows "Connection interrupted" (2026-10-26)
+  const srvAgo = run && run.idleSec != null ? (run.idleSec < 90 ? `${run.idleSec} с` : `${Math.round(run.idleSec / 60)} мин`) : "";
+  if (srvAgo) extras.push(`на сервере чат обновлялся ${srvAgo} назад`);
   const base = { t, s, extra: extras.join(" · ") };
   const bad = (text, primary) => Object.assign(base, { sev: "bad", text, primary });
   const warn = (text, primary) => Object.assign(base, { sev: "warn", text, primary });
   const ok = text => Object.assign(base, { sev: "ok", text, primary: null });
   if (t.discarded) return Object.assign(ok("Спит: страница выгружена из памяти, загрузится при открытии."), { sleeping: true });
   if (s.broken) return bad(`Страница не загрузилась (сервер ответил ${s.broken.status}). Расширение попробует снова, когда сервер спокоен${s.broken.heals ? `; попыток: ${s.broken.heals}` : ""}.`, { label: "Повторить", act: "heal" });
+  // checked before "knocks too often": a page that lost its answer polls the server while it waits, and restarting
+  // it does not help (the answer is produced on the server either way)
+  if (s.interrupted >= 0) return warn(`Связь с ответом оборвалась${s.interrupted ? " " + s.interrupted + " мин назад" : ""} («Connection interrupted»): кнопка остановки видна, но страница ответа не получает и сама опрашивает сервер — перезапуск не поможет. ${srvAgo ? (run.state === "live" ? "Сервер ещё работает над чатом — подождите." : "Сервер давно не менял чат — скорее всего, завис: остановите ответ в меню ⋯.") : "Спросите сервер: если ответ готов, обновите вкладку."}`, { label: "Что на сервере?", act: "status" });
   if (s.loop || hot) return bad(`Слишком часто стучится на сервер: ${s.req60} запросов в минуту${hot ? `, отказов за 10 минут: ${s.c429_10}` : ""}. Лучше перезапустить.`, { label: "Перезапустить", act: "restart" });
   if (s.deadStream) return warn("Ответ завис на сервере. Расширение сказало странице, что он закончился, чтобы она не долбила сервер. Снимется само через 20 минут.", { label: "Снять", act: "undead" });
-  if (s.interrupted >= 0) return warn(`Связь с ответом оборвалась${s.interrupted ? " " + s.interrupted + " мин назад" : ""} («Connection interrupted»): кнопка остановки видна, но ответ не приходит. Спросите сервер: если ответ готов, обновите вкладку; если ещё пишется, подождите.`, { label: "Что на сервере?", act: "status" });
   if (s.streaming >= 10) return warn(`Сервер уже ${s.streaming} мин пишет ответ. Если чат давно не менялся, он завис: спросите сервер кнопкой «Что на сервере?».`, { label: "Что на сервере?", act: "status" });
   if (s.stopReq >= 0) return warn("Остановка принята, сервер заканчивает работу. Подождите несколько минут.", null);
-  if (run && run.state !== "live") return warn("Фоновая работа давно не обновлялась: возможно, она остановилась.", { label: "Что на сервере?", act: "status" });
-  if (run) return ok("Работает на сервере в фоне. Страница может писать «Message delivery timed out»: это нормально, не нажимайте Retry.");
+  if (run && run.state === "stalled") return warn("Фоновая работа давно не обновлялась: возможно, она остановилась.", { label: "Что на сервере?", act: "status" });
+  if (run && run.state === "live") return ok("Работает на сервере в фоне. Страница может писать «Message delivery timed out»: это нормально, не нажимайте Retry.");
   if (!s.guard) return warn("Расширение не следит за этой вкладкой.", { label: "Защитить открытые", act: "protect" });
   return ok("В порядке.");
 }
@@ -280,7 +286,7 @@ function renderRuns() {
   const r = snap.reaper;
   if (!r) return;
   const live = r.runs.filter(x => x.state === "live").length;
-  const stalled = r.runs.length - live;
+  const stalled = r.runs.filter(x => x.state === "stalled").length;
   $("runsLine").textContent = r.runs.length
     ? `работают: ${live}` + (stalled ? ` · давно не обновлялись: ${stalled}` : "") + (r.done.length ? ` · недавно завершено: ${r.done.length}` : "")
     : "Сейчас фоновых прогонов нет" + (r.done.length ? ` · недавно завершено: ${r.done.length}` : "");
@@ -290,7 +296,8 @@ function renderRuns() {
   for (const x of r.runs) {
     const when = x.idleSec == null ? "" : x.idleSec < 90 ? `обновлён ${x.idleSec} с назад` : `обновлён ${Math.round(x.idleSec / 60)} мин назад`;
     box.append(el("div", { class: "sess" },
-      el("span", { text: `${x.state === "live" ? "Работает" : "Застряло?"}: ${x.t || "(без названия)"} · ${when}` }),
+      el("span", x.state === "leftover" ? { class: "note", text: `Закончено давно (сервер не снял пометку «фоновая работа»): ${x.t || "(без названия)"} · ${when}` }
+        : { text: `${x.state === "live" ? "Работает" : "Застряло?"}: ${x.t || "(без названия)"} · ${when}` }),
       el("button", { class: "small ghost", text: "Открыть", onclick: () => openChat(x.id, x.g) })));
   }
   for (const d of r.done.slice(0, 4)) {

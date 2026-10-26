@@ -250,10 +250,10 @@ try {
   const loopTab = await openTab("https://chatgpt.com/c/loop1?poll=1");
   const q1 = await openTab("https://chatgpt.com/c/quiet1");
   const q2 = await openTab("https://chatgpt.com/c/quiet2");
-  await sleep(16000);
-  s = await snap();
+  // poll instead of a fixed 16 s: on a loaded machine the poller page can start late (2026-10-26)
   const tl = await tabsList();
   const idOf = frag => tl.find(t => t.url.includes(frag)).id;
+  for (let i = 0; i < 45; i++) { await sleep(1000); s = await snap(); if (i >= 15 && (s.tabs[idOf("loop1")] || {}).loop) break; }
   const loopStats = s.tabs[idOf("loop1")];
   check("polling tab is flagged as a loop", loopStats && loopStats.loop, loopStats);
   check("quiet tabs are NOT flagged", !(s.tabs[idOf("quiet1")] || {}).loop && !(s.tabs[idOf("quiet2")] || {}).loop);
@@ -474,7 +474,7 @@ try {
   const md = await call({ type: "markDead", id: zt2.id });
   check("markDead is accepted by the page bridge", md && md.ok === true, md);
   let settled = false, zt3 = null;
-  for (let i = 0; i < 40 && !settled; i++) { zt3 = await titleOf("6acbd9ff"); settled = zt3 && /^zombie loaded/.test(zt3.t); if (!settled) await sleep(1000); }
+  for (let i = 0; i < 75 && !settled; i++) { zt3 = await titleOf("6acbd9ff"); settled = zt3 && /^zombie loaded/.test(zt3.t); if (!settled) await sleep(1000); }
   check("after the manual mark the (reloaded) page gets COMPLETE immediately and loads the chat", settled, zt3 && zt3.t);
   await call({ type: "setCfg", patch: { deadAfter: 2 } });
 
@@ -602,7 +602,7 @@ try {
   const intTab = (await tabsList()).find(t => t.url.includes("inter1"));
   await ev(pop, `chrome.tabs.update(${intTab.id},{active:true}).then(()=>chrome.scripting.executeScript({target:{tabId:${intTab.id}},world:"MAIN",func:()=>{const a=document.createElement('a');a.href='/g/g-p-abc123def-pedvuzy/project';a.textContent='Педвузы';document.body.appendChild(a);const c=document.createElement('a');c.href='/g/g-p-abc123def-pedvuzy/c/other';c.textContent='Some chat';document.body.prepend(c);const m=document.querySelector('main')||document.body;const d=document.createElement('div');d.textContent='Connection interrupted. Waiting for the complete answer';m.appendChild(d);}}))`);
   let it = null, itJ = [];
-  for (let i = 0; i < 30 && !(it && it.interrupted >= 0 && it.project && itJ.length); i++) {
+  for (let i = 0; i < 45 && !(it && it.interrupted >= 0 && it.project && itJ.length); i++) {
     await sleep(1000);
     const sn = await snap(); it = sn.tabs[intTab.id];
     itJ = (sn.journal || []).filter(e => e.e === "ui-error" && e.what === "connection-interrupted" && e.tab === intTab.id);

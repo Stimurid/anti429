@@ -212,7 +212,7 @@
   // goes on. A chat that is IS_STREAMING is NOT a run: that is the zombie domain (reaper).
   // prev: { firstSeen, lastU, lastMoveAt, lastSeen } | null ; cur: { a, status, updMs } | null (null = not in this scan)
   function runVerdict(prev, cur, now, cfg) {
-    const c = Object.assign({ runStaleMs: 15 * 60000, forgetMs: 30 * 60000 }, cfg || {});
+    const c = Object.assign({ runStaleMs: 15 * 60000, leftoverMs: 3 * 3600000, forgetMs: 30 * 60000 }, cfg || {});
     const out = (action, rec) => ({ action, rec: rec || null });
     if (cur && cur.status === "IS_STREAMING") return out("ignore");
     if (cur && cur.a === 3) {
@@ -221,7 +221,9 @@
         firstSeen: (prev && prev.firstSeen) || now, lastU: cur.updMs, lastSeen: now,
         lastMoveAt: prev && prev.lastU === cur.updMs ? (prev.lastMoveAt || now) : now
       };
-      return out(idle <= c.runStaleMs ? "live" : "stalled", rec);
+      // Not changed for hours: the run ended long ago and the server simply kept its "background work" mark
+      // (2026-10-26: chats answered a day earlier were shown as "stuck").
+      return out(idle <= c.runStaleMs ? "live" : idle <= c.leftoverMs ? "stalled" : "leftover", rec);
     }
     if (cur && prev) return out("done", prev);   // async_status left 3: the run finished
     if (!cur && prev) return now - (prev.lastSeen || 0) > c.forgetMs ? out("forget") : out("unknown", prev);

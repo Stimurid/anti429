@@ -550,7 +550,7 @@ async function reaperTick(force) {
     for (const it of scan.items) {
       seenIds.add(it.id);
       const rv = A.runVerdict(R.runs[it.id] || null, { a: it.a, status: scan.statuses[it.id], updMs: it.u }, now, { runStaleMs: cfg.runStaleMs });
-      if (rv.action === "live" || rv.action === "stalled") R.runs[it.id] = Object.assign({}, rv.rec, { t: it.t, g: it.g || null, state: rv.action });
+      if (rv.action === "live" || rv.action === "stalled" || rv.action === "leftover") R.runs[it.id] = Object.assign({}, rv.rec, { t: it.t, g: it.g || null, state: rv.action });
       else if (rv.action === "done") { notifyRunDone(R, it.id, R.runs[it.id], it.t, now); delete R.runs[it.id]; }
       else if (rv.action === "ignore") delete R.runs[it.id];
     }

@@ -317,3 +317,10 @@ test("hotHoldMs: refusals in a row with nothing accepted hold the family longer 
   assert.equal(A.hotHoldMs(5), 15 * 60000);
   assert.equal(A.hotHoldMs(40), 15 * 60000);
 });
+
+test("runVerdict: a 'background work' mark on a chat that has not changed for hours is a leftover, not a stuck run", () => {
+  const now = 10 * 3600000;
+  assert.equal(A.runVerdict(null, { a: 3, status: "COMPLETE", updMs: now - 20 * 60000 }, now, {}).action, "stalled");
+  assert.equal(A.runVerdict(null, { a: 3, status: "COMPLETE", updMs: now - 1533 * 60000 }, now, {}).action, "leftover");
+  assert.equal(A.runVerdict(null, { a: 3, status: "COMPLETE", updMs: now - 60000 }, now, {}).action, "live");
+});
