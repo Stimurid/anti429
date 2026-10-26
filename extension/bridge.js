@@ -177,7 +177,7 @@
             const id=project?.id,name=project?.display?.name;
             if(!validProject(id)||typeof name!=="string"||!name.trim())continue;
             gizmos.add(id);
-            out.projectNames[id]=name.replace(/\\s+/g," ").trim().slice(0,64);
+            out.projectNames[id]=name.replace(/\s+/g," ").trim().slice(0,64);
           }
           out.catalogFetched=true;
           out.catalogNextCursor=typeof j.cursor==="string"&&j.cursor?j.cursor:null;
