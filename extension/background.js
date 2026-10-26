@@ -458,7 +458,7 @@ async function reaperTick(force) {
       const openProjects=tabs.map(t=>(String(t.url).split("/g/")[1]||"").split("/")[0])
         .filter(g=>self.A429ProjectCache?.goodProject(g));
       const catalogue=Object.keys(R.projectCatalog||{}).filter(g=>self.A429ProjectCache?.goodProject(g));
-      scan = await chrome.tabs.sendMessage(tab.id, { type: "a429_scan", params: {
+      const params={
         idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: [...new Set([...watchIds,...Object.keys(R.obs)])],
         paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus,
         maxList: deep ? 224 : 56, projectPages: deep ? 3 : 1,
@@ -469,7 +469,20 @@ async function reaperTick(force) {
           "0":(R.projectCatalogCursor||"0"),
         skip: Object.fromEntries(Object.entries(R.chk).filter(([, v]) => v.st === "COMPLETE").map(([k, v]) => [k, v.u])),
         projectIds: [...new Set([...openProjects,...catalogue])]
-      } });
+      };
+      try{
+        // Inject only the new metadata reader. Unlike the legacy bridge.js,
+        // it has no 4-second timers; reloading ChatGPT tabs is not required.
+        await chrome.scripting.executeScript({target:{tabId:tab.id},
+          world:"ISOLATED",files:["project_audit_bridge.js"]});
+        scan=await chrome.tabs.sendMessage(tab.id,{
+          type:"a429_project_audit_v1",params});
+      }catch(_){
+        // Existing reaper continues to work when this extension/page cannot
+        // expose project metadata. Legacy scan remains network-budgeted.
+        try{scan=await chrome.tabs.sendMessage(tab.id,{type:"a429_scan",params});}
+        catch(_){}
+      }
     } catch {}
     reaperAuditing = false;
     R.lastAudit = now;
