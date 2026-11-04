@@ -1,10 +1,10 @@
-// 429 v0.5.15: on-demand account audit in the existing selected ChatGPT tab.
+// 429 v0.5.16: on-demand account audit in the existing selected ChatGPT tab.
 // Separate from bridge.js gen3: no second traffic/status timer, no duplicate
 // legacy onMessage responder after extension reload, no user page reload.
 (()=>{
   "use strict";
-  if(globalThis.__A429_PROJECT_AUDIT_VERSION__==="0.5.15")return;
-  globalThis.__A429_PROJECT_AUDIT_VERSION__="0.5.15";
+  if(globalThis.__A429_PROJECT_AUDIT_VERSION__==="0.5.16")return;
+  globalThis.__A429_PROJECT_AUDIT_VERSION__="0.5.16";
   const sleepMs = ms => new Promise(r => setTimeout(r, ms));
   async function scanAccount(p) {
     const pace = Math.max(0, p.paceMs == null ? 2000 : p.paceMs); // one request per `pace` ms: stay far below the limiters
@@ -110,6 +110,7 @@
     const selected=allProjects.length?
       Array.from({length:Math.min(maxProjects,allProjects.length)},
         (_,i)=>allProjects[(offset+i)%allProjects.length]):[];
+    const okProjects=new Set();
     for(const g of selected){
       if(out.rate)break;
       let cur=typeof p.projectCursors?.[g]==="string"&&p.projectCursors[g]?
@@ -123,6 +124,7 @@
         if(!Array.isArray(j.items))break;
         j.items.forEach(it=>add(it,g));
         scanned=true;
+        okProjects.add(g);
         cur=typeof j.cursor==="string"&&j.cursor&&j.items.length?j.cursor:"0";
         if(cur==="0")break;
       }
@@ -134,6 +136,10 @@
         out.projectsScanned++;
       }
     }
+    // Every visited project failed (and not because of a 429): report it so the rotation drops it for a while
+    // instead of re-asking forever (2026-11-04: slugged ids 404ed on every round for 4+ hours).
+    if(!out.rate&&selected.length&&okProjects.size<selected.length)
+      out.deadProjects=selected.filter(g=>!okProjects.has(g));
     const now = Date.now();
     const skip = p.skip || {};
     const suspects = [], fresh = [];

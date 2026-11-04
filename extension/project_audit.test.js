@@ -82,6 +82,32 @@ test("unknown and absent projects remain unknown, not title-inferred",async()=>{
  assert.equal(answer.items[0].g,null);
  assert.equal(answer.items[0].conflict,false);
 });
+test("a project that keeps answering 404 is reported dead so the rotation drops it",async()=>{
+ let listener=null;
+ const fetch=async address=>{
+  if(address==="/api/auth/session")
+   return response({accessToken:"mock-never-returned",user:{id:"test-account-1234567890"},activeAccountId:"acc-001"});
+  if(address.startsWith("/backend-api/gizmos/"+PID+"/conversations"))
+   return {ok:false,status:404,async json(){return {};}};
+  if(address.startsWith("/backend-api/conversations?"))
+   return response({items:[{id:CID,title:"PRIVATE",gizmo_id:null,update_time:"2020-01-01"}]});
+  throw Error("Unexpected network request "+address);
+ };
+ const chrome={runtime:{id:"own-429-extension",onMessage:{addListener(fn){listener=fn;}}}};
+ vm.runInNewContext(SRC,{chrome,fetch,crypto:webcrypto,TextEncoder,setTimeout,Date,Promise,console});
+ const answer=await new Promise(resolve=>{
+  const asynchronous=listener({type:"a429_project_audit_v1",params:{
+   paceMs:0,maxList:28,maxStatus:1,projectPages:1,maxProjects:2,
+   projectIds:[PID],catalogFetch:false,projectOffset:0
+  }},{id:chrome.runtime.id},resolve);
+  assert.equal(asynchronous,true);
+ });
+ assert.equal(answer.ok,true);
+ assert.equal(Array.isArray(answer.deadProjects),true); // vm context: compare items, not prototypes
+ assert.equal(answer.deadProjects.length,1);
+ assert.equal(answer.deadProjects[0],PID);
+ assert.equal(answer.projectsScanned,1);
+});
 test("project scanner adds no periodic loop, and ignores foreign messages",()=>{
  assert(!SRC.includes("setInterval("));
  assert(SRC.includes("a429_project_audit_v1"));

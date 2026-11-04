@@ -61,6 +61,8 @@ const STOP = {}; // tabId -> { at }  when the extension last sent stop_conversat
 const D = {};   // tabId -> ts the guard declared that tab's stream dead
 const S = {};   // tabId -> { status, since }  last stream_status seen on that page
 let lastHealAny = 0;
+const HL = {};   // tabId -> ts of the last automatic heal of that tab (a 429 soon after it is "provoked")
+const SF = {};   // tabId -> { n, lastAt, what, handledAt } failed sends (POST /backend-api/f/conversation)
 let dirty = false;
 
 const tabStats = id => (T[id] || (T[id] = { req: [], fam: {}, bytes: [], c429: [] }));
@@ -219,10 +221,22 @@ function logErr(details, u, what, fam) {
   ERRS[k] = 1;
   jr("err", { what, m: details.method, p: normPath(u.pathname), fam: fam || null, tab });
 }
+// Failed SENDS of a user message (POST /backend-api/f/conversation): 413 "Payload Too Large" arrives even for a
+// one-word message when the chat's server-side state is bloated, net::ERR_FAILED / ERR_HTTP2_PROTOCOL_ERROR are
+// dropped connections; the page answers them with "An unknown error occurred" and the chat stays dead.
+// The guard never wraps POSTs, so every such failure is server/edge side — count them per tab and revive the tab.
+function sendFail(details, u, what) {
+  if (details.method !== "POST" || u.pathname !== "/backend-api/f/conversation" || details.tabId < 0) return;
+  const s = SF[details.tabId] || (SF[details.tabId] = { n: 0, lastAt: 0, what: {}, handledAt: 0 });
+  s.n++;
+  s.lastAt = Date.now();
+  s.what[what] = (s.what[what] || 0) + 1;
+}
 chrome.webRequest.onErrorOccurred.addListener(details => {
   if (details.error === "net::ERR_ABORTED" || details.error === "net::ERR_BLOCKED_BY_CLIENT") return;
   const u = parseUrl(details.url);
   if (!u) return;
+  sendFail(details, u, details.error || "net error");
   logErr(details, u, details.error || "net error", A.classify(details.method, u.pathname));
 }, { urls: URLS });
 
@@ -258,6 +272,7 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
     if (Number.isFinite(len) && len > 0) tabStats(details.tabId).bytes.push({ ts: now, b: len });
   }
   if (details.statusCode >= 400 && details.statusCode !== 429) logErr(details, u, "http " + details.statusCode, fam);
+  if (details.statusCode >= 400) sendFail(details, u, "http " + details.statusCode);
   if (!fam) return;
   if (details.statusCode !== 429) {
     if (details.statusCode < 400) {
@@ -296,7 +311,12 @@ chrome.webRequest.onHeadersReceived.addListener(details => {
   f.learned = true;
   f.last429 = now;
   f.c429.push(now);
-  if (lastHealAny && now - lastHealAny < 120000 && now - HF.last > 20000) {
+  // A 429 is "provoked" by healing when it lands soon after a heal — of ANY tab (2 min) or of THIS tab (10 min:
+  // 2026-11-04, a tab healed every ~40 s for half an hour: the 429s arrived >2 min after the heals, so the pause
+  // never armed and the heal loop kept poking a server in penalty).
+  const provoked = (lastHealAny && now - lastHealAny < 120000) ||
+    (details.tabId >= 0 && HL[details.tabId] && now - HL[details.tabId] < 10 * 60000);
+  if (provoked && now - HF.last > 20000) {
     HF.last = now; HF.streak++;
     HF.until = now + A.healPauseMs(HF.streak) * (cfg.healPauseScale == null ? 1 : cfg.healPauseScale);
     jr("heal-pause", { streak: HF.streak, min: Math.round(A.healPauseMs(HF.streak) / 60000) });
@@ -336,8 +356,8 @@ chrome.tabs.onCreated.addListener(tab => {
   }
 });
 
-chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; delete STOP[id]; persistSoon(); });
-chrome.tabs.onUpdated.addListener((id, info, tab) => { if (info.status === "loading") { if (tab && String(tab.url || "").startsWith("https://chatgpt.com/")) LOADS++; delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; } });
+chrome.tabs.onRemoved.addListener(id => { delete T[id]; delete H[id]; delete P[id]; delete G[id]; delete R[id]; delete B[id]; delete D[id]; delete S[id]; delete STOP[id]; delete HL[id]; delete SF[id]; persistSoon(); });
+chrome.tabs.onUpdated.addListener((id, info, tab) => { if (info.status === "loading") { if (tab && String(tab.url || "").startsWith("https://chatgpt.com/")) LOADS++; delete H[id]; delete P[id]; delete G[id]; delete B[id]; delete D[id]; delete S[id]; delete HL[id]; delete SF[id]; } });
 
 // ---------- snapshot / render ----------
 function famRow(id, now) {
@@ -483,7 +503,8 @@ async function reaperState() {
   const { reaper } = await chrome.storage.local.get("reaper");
   return Object.assign({ obs: {}, chk: {}, log: [], runs: {}, done: [], lastAudit: 0, lastDeep: 0, lastReqs: 0, lastMs: 0, lastRate: 0, lastError: null, stopsDay: { day: "", n: 0 },
     projectCatalog: {}, projectCursors: {}, projectOffset: 0,
-    projectCatalogCursor:"0",projectCatalogComplete:false,projectAccountScope:null
+    projectCatalogCursor:"0",projectCatalogComplete:false,projectAccountScope:null,
+    deadProjects: {}
   }, reaper || {});
 }
 
@@ -511,9 +532,16 @@ async function reaperTick(force) {
     let scan = null;
     reaperAuditing = true; // the audit's own requests are not the user's load: keep them out of the meters/learning
     try {
+      // Tab URLs carry the display slug (g-p-<hex>-artikl-i-trimurti), the API wants the bare gizmo id
+      // (g-p-<hex>): with the slug every /gizmos/<id>/conversations answered 404 all day (2026-11-04).
+      const bareProject=g=>{const m=String(g).match(/^(g-p-[0-9a-f]{32})/i);return m?m[1]:g;};
+      const dead=R.deadProjects||{}; // gizmo id -> {n consecutive failed visits, last ts}: 2+ failures = out for 24 h
+      const deadMs=24*3600000;
+      const alive=g=>{const e=dead[g];return !e||(e.n||0)<2||now-(e.last||0)>deadMs;};
       const openProjects=tabs.map(t=>(String(t.url).split("/g/")[1]||"").split("/")[0])
-        .filter(g=>self.A429ProjectCache?.goodProject(g));
-      const catalogue=Object.keys(R.projectCatalog||{}).filter(g=>self.A429ProjectCache?.goodProject(g));
+        .map(bareProject)
+        .filter(g=>self.A429ProjectCache?.goodProject(g)&&alive(g));
+      const catalogue=Object.keys(R.projectCatalog||{}).map(bareProject).filter(g=>self.A429ProjectCache?.goodProject(g)&&alive(g));
       const params={
         idleMs: cfg.reaperIdleMs, lookbackMs: cfg.reaperLookbackMs, checkIds: [...new Set([...watchIds,...Object.keys(R.obs)])],
         paceMs: cfg.reaperPaceMs, maxStatus: cfg.reaperMaxStatus,
@@ -557,8 +585,17 @@ async function reaperTick(force) {
       R.projectCatalog={...(R.projectCatalog||{}),...(scan.projectNames||{})};
       R.projectCatalogCursor=scan.catalogNextCursor||"0";
       R.projectCatalogComplete=!scan.catalogNextCursor;
+      // a project the catalog lists under a good id is alive again: clear its 404 mark
+      if (R.deadProjects) for (const g of Object.keys(scan.projectNames||{})) delete R.deadProjects[g];
     }
     if(scan.projectsScanned>0)R.projectOffset=(R.projectOffset||0)+scan.projectsScanned;
+    if (Array.isArray(scan.deadProjects)) { // projects that keep answering 404 leave the rotation for 24 h
+      R.deadProjects = R.deadProjects || {};
+      for (const g of scan.deadProjects) {
+        const prev = R.deadProjects[g] || { n: 0 };
+        R.deadProjects[g] = { n: (prev.n || 0) + 1, last: now };
+      }
+    }
     if(scan.projectCursors)R.projectCursors={
       ...(R.projectCursors||{}),...scan.projectCursors};
     // Reuse the SAME already-conducted account audit; zero additional HYDRA provider reads.
@@ -685,6 +722,7 @@ async function healTab(id, manual) {
   const b = B[id] || (B[id] = { heals: 0, lastHealAt: 0, failedAt: Date.now() });
   b.heals = (b.heals || 0) + 1;
   b.lastHealAt = Date.now();
+  HL[id] = Date.now();
   if (!manual) { lastHealAny = Date.now(); (HB[id] = (HB[id] || []).filter(t => Date.now() - t < 20 * 60000)).push(Date.now()); saveHeal(); }
   let res = null;
   jr("heal", { tab: id, manual: !!manual, n: b.heals });
@@ -744,6 +782,26 @@ function notifyLoop(nid, title, message) {
   try { chrome.notifications.create(nid, { type: "basic", iconUrl: "icons/icon128.png", title, message, priority: 1 }); } catch {}
 }
 
+async function sendFailTick() {
+  const now = Date.now();
+  for (const [sid, s] of Object.entries(SF)) {
+    const id = Number(sid);
+    if (now - s.lastAt > 30 * 60000) { delete SF[sid]; continue; } // old news
+    if (s.n < 2 || now - (s.handledAt || 0) < 3600000) continue;    // 2+ failures, at most once an hour per tab
+    let tab = null;
+    try { tab = await chrome.tabs.get(id); } catch {}
+    if (!tab || tab.discarded) { delete SF[sid]; continue; }
+    s.handledAt = now;
+    const wh4t = Object.entries(s.what).map(([k, v]) => k + "×" + v).join(", ");
+    jr("send-fail", { tab: id, n: s.n, what: wh4t });
+    queueRestart(id, 30000, "send-fail", tab.url || null);
+    notifyLoop("a429-sendfail-" + id + "-" + now,
+      s.what["http 413"] ? "Чат отклоняет отправку как «слишком большую»" : "Отправка в чат обрывается",
+      (tab.title || "вкладка") + ": сервер отверг " + s.n + " отправки подряд (" + wh4t + "). " +
+      (s.what["http 413"] ? "Текст тут ни при чём — у чата раздулось состояние на сервере. " : "") +
+      "Вкладка перезагрузится сама, когда лимитер спокоен. Если не поможет — чат завис на сервере, продолжайте в новом.");
+  }
+}
 async function healTick() {
   reaperTick(false).catch(() => {});
   autoStopTick().catch(() => {});
@@ -751,6 +809,7 @@ async function healTick() {
   memoryTick().catch(() => {});
   restartTick(Date.now()).catch(() => {});
   journalTick(Date.now()).catch(() => {});
+  sendFailTick().catch(() => {});
   if (healBusy || cfg.autoHeal === false) return;
   if (Date.now() < HF.until) return; // paused after a heal that got another 429
   if (HF.streak && Date.now() - HF.last > 30 * 60000) HF.streak = 0;
