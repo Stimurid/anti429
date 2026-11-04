@@ -1020,6 +1020,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return sendResponse(Object.assign(snapshot(), { sessions, restoreQueue: restoreQueue.length, reaper: await reaperSummary(), journal: (await jrReady, JR.slice(-40)), hib: (await chrome.storage.local.get('hib')).hib || [] }));
       }
       case "discard": return sendResponse(await discardTabs(msg.ids || [], msg.force));
+      case "discardAll": {
+        // Owner's emergency valve: unload EVERY ChatGPT tab. Discarded pages make zero requests
+        // (page polls, HYDRA content scripts, everything stops) and reload only on click.
+        const kept = [], done = [];
+        for (const t of (await chatTabs())) {
+          if (t.discarded) continue;
+          if (t.active) { kept.push({ id: t.id, reason: "active" }); continue; } // Chrome не выгружает активную вкладку
+          try {
+            const d = await chrome.tabs.discard(t.id);
+            if (d && d.discarded) { done.push(t.id); delete T[t.id]; delete H[t.id]; delete P[t.id]; delete G[t.id]; delete B[t.id]; }
+            else kept.push({ id: t.id, reason: "not-discarded" });
+          } catch { kept.push({ id: t.id, reason: "error" }); }
+        }
+        persistSoon();
+        jr("unload-all", { n: done.length, kept: kept.length });
+        return sendResponse({ discarded: done, kept });
+      }
       case "resetHealPause": HF.streak = 0; HF.until = 0; saveHeal(); for (const f of A.FAMILY_IDS) { F[f].oks = []; F[f].hot = 0; F[f].hotAt = 0; } return sendResponse({ ok: true }); // test hook
       case "chatStatus": {
         let r = null;

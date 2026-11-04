@@ -79,7 +79,7 @@ def main():
         days = Counter(datetime.datetime.fromtimestamp(e["t"] / 1000).strftime("%m-%d") for e in c429)
         print("- per day:", dict(sorted(days.items())))
     print("\n## Self-protection actions")
-    for k in ("hib", "heal", "heal-pause", "restart-queued", "restart", "restart-lost", "restart-failed", "mem-discard", "tab-storm", "send-fail"):
+    for k in ("hib", "heal", "heal-pause", "restart-queued", "restart", "restart-lost", "restart-failed", "mem-discard", "tab-storm", "send-fail", "unload-all"):
         print("- %s: %d" % (k, kinds.get(k, 0)))
     pauses = [e for e in W if e["e"] == "heal-pause"]
     if pauses: print("- longest heal pause: %d min (streak %d)" % (max(e["min"] for e in pauses), max(e["streak"] for e in pauses)))

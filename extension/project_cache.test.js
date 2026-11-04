@@ -91,7 +91,7 @@ test("429 bridges HYDRA without a new scan on read and keeps the 429 limiter",()
  const bg=fs.readFileSync(path.join(__dirname,"background.js"),"utf8");
  const provider=fs.readFileSync(path.join(__dirname,"project_audit_bridge.js"),"utf8");
  const manifest=JSON.parse(fs.readFileSync(path.join(__dirname,"manifest.json"),"utf8"));
- assert.equal(manifest.version,"0.5.16");
+ assert.equal(manifest.version,"0.5.17");
  assert(bg.includes('msg?.type==="hydra.projectMembership.read"'));
  assert(bg.includes("cacheModule.read(cache,ids,Date.now())"));
  assert(bg.includes("calmNow(now)"));

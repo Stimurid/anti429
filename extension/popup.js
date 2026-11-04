@@ -385,6 +385,15 @@ $("btnLoops").onclick = async () => {
   refresh(true);
   return `Выгружено вкладок: ${(r && r.discarded || []).length}`;
 };
+$("btnAll").onclick = async () => {
+  const ids = tabsNow.filter(t => !t.discarded);
+  if (!ids.length) return "Выгружаемых вкладок нет";
+  if (!confirm(`Выгрузить ВСЕ вкладки ChatGPT (${ids.length})? Это остановит вообще все запросы к серверу (страницы, HYDRA, опросы) и освободит память. Неотправленный текст и недописанные ответы в выгруженных вкладках пропадут. Активную вкладку Chrome не даст выгрузить.`)) return false;
+  const r = await send({ type: "discardAll" });
+  refresh(true);
+  const kept = (r && r.kept || []).length;
+  return `Выгружено вкладок: ${(r && r.discarded || []).length}` + (kept ? `, осталась активная (${kept})` : "");
+};
 $("btnBg").onclick = async () => {
   const ids = tabsNow.filter(t => !t.active && !t.discarded && !t.audible).map(t => t.id);
   if (!ids.length) return "Фоновых вкладок для выгрузки нет";
